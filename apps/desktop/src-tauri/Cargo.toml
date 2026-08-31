@@ -1,7 +1,7 @@
 [package]
 name = "nexus-desktop"
 version = "0.1.0"
-description = "Nexus local-first Personal Data OS desktop shell"
+description = "Nexus 本地优先个人数据操作系统桌面壳层"
 authors = ["Nexus contributors"]
 edition = "2021"
 
@@ -10,7 +10,10 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 nexus-core = { path = "../../../crates/nexus-core" }
+serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.11.5", features = [] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [features]
 default = ["custom-protocol"]

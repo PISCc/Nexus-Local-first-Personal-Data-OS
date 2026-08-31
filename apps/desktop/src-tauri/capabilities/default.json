@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal permissions for the Nexus desktop shell.",
+  "description": "Nexus 桌面壳层的最小权限。",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

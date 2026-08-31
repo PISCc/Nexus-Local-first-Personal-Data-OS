@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
 const principles = [
   {
     index: "01",
@@ -16,7 +19,93 @@ const principles = [
   },
 ];
 
+type StartupPhase = "loading" | "ready" | "degraded";
+
+type StartupStatus = {
+  phase: StartupPhase;
+  message: string;
+};
+
+type BackendStartupStatus = {
+  phase: Exclude<StartupPhase, "loading">;
+  message: string;
+};
+
+const initialStartupStatus: StartupStatus = {
+  phase: "loading",
+  message: "正在连接本地核心，请稍候。",
+};
+
+const statusPresentation: Record<
+  StartupPhase,
+  { label: string; title: string; footer: string }
+> = {
+  loading: {
+    label: "正在检查",
+    title: "正在连接本地核心。",
+    footer: "检查中",
+  },
+  ready: {
+    label: "本地 / 就绪",
+    title: "基础界面已启动。",
+    footer: "连接正常",
+  },
+  degraded: {
+    label: "降级 / 需处理",
+    title: "本地核心暂不可用。",
+    footer: "尚未连接",
+  },
+};
+
+function isBackendStartupStatus(value: unknown): value is BackendStartupStatus {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.phase === "ready" || candidate.phase === "degraded") &&
+    typeof candidate.message === "string"
+  );
+}
+
+async function loadStartupStatus(): Promise<StartupStatus> {
+  try {
+    const response = await invoke<unknown>("get_startup_status");
+
+    if (isBackendStartupStatus(response)) {
+      return response;
+    }
+  } catch {
+    // 浏览器预览没有 Tauri 核心，统一呈现为可理解的降级状态。
+  }
+
+  return {
+    phase: "degraded",
+    message: "桌面核心暂不可用，当前处于降级模式。",
+  };
+}
+
 function App() {
+  const [startupStatus, setStartupStatus] =
+    useState<StartupStatus>(initialStartupStatus);
+
+  useEffect(() => {
+    let active = true;
+
+    void loadStartupStatus().then((status) => {
+      if (active) {
+        setStartupStatus(status);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const presentation = statusPresentation[startupStatus.phase];
+
   return (
     <div className="app-shell">
       <aside className="side-rail" aria-label="Nexus 导航">
@@ -88,12 +177,15 @@ function App() {
               </div>
             </div>
 
-            <section className="status-card" aria-labelledby="status-title">
+            <section
+              className={`status-card status-card-${startupStatus.phase}`}
+              aria-labelledby="status-title"
+            >
               <div className="status-card-header">
                 <span className="eyebrow">运行状态</span>
-                <span className="status-state">
+                <span className="status-state" aria-live="polite">
                   <span className="status-dot" aria-hidden="true" />
-                  本地 / 就绪
+                  {presentation.label}
                 </span>
               </div>
               <div className="status-card-body">
@@ -101,14 +193,14 @@ function App() {
                   01
                 </span>
                 <div>
-                  <h2 id="status-title">基础界面已启动。</h2>
-                  <p>第一版界面保持克制，为本地核心留出可靠的生长空间。</p>
+                  <h2 id="status-title">{presentation.title}</h2>
+                  <p>{startupStatus.message}</p>
                 </div>
               </div>
               <div className="status-card-footer">
                 <span>核心连接</span>
                 <span className="footer-rule" aria-hidden="true" />
-                <strong>尚未连接</strong>
+                <strong>{presentation.footer}</strong>
               </div>
             </section>
           </section>

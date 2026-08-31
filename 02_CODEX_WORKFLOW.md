@@ -1,11 +1,11 @@
-# Codex Collaboration Guide
+# Codex 协作指南
 
 ## 核心工作方式
 
 固定循环：
 
 ``` text
-Research -> Plan -> Implement -> Test -> Review -> Document
+调查 → 计划 → 实现 → 测试 → 复核 → 文档
 ```
 
 不要使用"帮我实现整个 Nexus"这种大范围 Prompt。
@@ -14,27 +14,27 @@ Research -> Plan -> Implement -> Test -> Review -> Document
 
 ### 1. 调查
 
-先让 Codex 读取： - AGENTS.md - ARCHITECTURE.md - 当前 milestone spec -
+先让 Codex 读取： - AGENTS.md - 03_ARCHITECTURE.md - 当前 milestone spec -
 相关代码和测试
 
 示例：
 
 ``` text
-Read AGENTS.md and inspect the current repository.
+阅读 AGENTS.md 并检查当前仓库。
 
-We are preparing to implement directory scanning.
+我们准备实现目录扫描。
 
-Do NOT modify code yet.
+现在不要修改代码。
 
-Analyze:
-1. current architecture
-2. where the scanner should live
-3. data structures needed
-4. error cases
-5. concurrency considerations
-6. test strategy
+请分析：
+1. 当前架构
+2. 扫描器应该放在哪里
+3. 所需的数据结构
+4. 错误情况
+5. 并发注意事项
+6. 测试策略
 
-Then propose an implementation plan with affected files.
+然后提出包含受影响文件的实现计划。
 ```
 
 ### 2. 审批计划
@@ -48,20 +48,20 @@ Then propose an implementation plan with affected files.
 示例：
 
 ``` text
-Proceed with Phase 1 only.
+只推进第一阶段。
 
-Implement the scanner core without UI integration.
+实现扫描器核心，不接入 UI。
 
-Requirements:
-- recursive scanning
-- configurable ignored paths
-- permission failures must not abort scanning
-- no panics in normal error cases
-- unit tests required
+要求：
+- 递归扫描
+- 可配置的忽略路径
+- 权限失败不能中止整个扫描
+- 正常错误情况下不 panic
+- 必须有单元测试
 
-Do not implement database persistence yet.
+暂时不要实现数据库持久化。
 
-Run all relevant tests after implementation.
+实现后运行所有相关测试。
 ```
 
 一次只做一个清晰、可验证的切片。
@@ -78,35 +78,34 @@ build/lint/typecheck 状态
 实现后再让 Codex切换角色：
 
 ``` text
-Review the implementation as if you were a senior engineer reviewing
-someone else's pull request.
+请像资深工程师审阅他人的 pull request 一样复核实现。
 
-Look specifically for:
-- correctness bugs
-- race conditions
-- unnecessary complexity
-- error handling problems
-- performance problems
-- missing tests
-- architectural violations
+重点检查：
+- 正确性问题
+- 竞态条件
+- 不必要的复杂度
+- 错误处理问题
+- 性能问题
+- 缺失的测试
+- 架构违规
 
-Do not modify code yet.
+现在不要修改代码。
 
-Report findings ordered by severity.
+按严重程度报告发现的问题。
 ```
 
 确认问题后：
 
 ``` text
-Fix the confirmed issues from the review.
+修复复核中确认的问题。
 
-Do not perform unrelated refactors.
+不要进行无关重构。
 
-After fixing:
-1. run tests
-2. run lint
-3. run relevant build checks
-4. summarize changes
+修复后：
+1. 运行测试
+2. 运行 lint
+3. 运行相关构建检查
+4. 总结变更
 ```
 
 ## 推荐工作颗粒度

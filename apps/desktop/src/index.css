@@ -334,6 +334,11 @@ select {
   background: var(--moss);
 }
 
+.status-card-loading::before,
+.status-card-degraded::before {
+  background: var(--amber);
+}
+
 .status-card-header,
 .status-card-footer {
   display: flex;
@@ -352,6 +357,17 @@ select {
   gap: 9px;
   color: var(--moss-dark);
   font-size: 9px;
+}
+
+.status-card-loading .status-state,
+.status-card-degraded .status-state {
+  color: var(--amber);
+}
+
+.status-card-loading .status-dot,
+.status-card-degraded .status-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(188, 143, 78, 0.16);
 }
 
 .status-card-body {

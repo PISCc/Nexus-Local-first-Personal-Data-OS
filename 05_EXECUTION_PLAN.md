@@ -20,8 +20,8 @@
 
 - 已有 React/Vite 前端和 Tauri 2 桌面壳层，Rust workspace 已包含 desktop、
   `nexus-core` 和 `nexus-db` 三个当前 crate。
-- 启动初始化、README 和 CI 仍待后续 M0 单元完成；SQLite 层已在 M0.4
-  建立最小初始化和迁移能力。
+- README、CI 和架构决策已在 M0.7 加入；SQLite 层已在 M0.4 建立最小初始化和
+  迁移能力，M0.5 已接入启动检查和降级状态。
 - Node.js 和 pnpm 已存在。
 - stable MSVC Rust toolchain、Rustfmt 和 Clippy 已安装并通过验证。
 - Visual Studio 2022 Build Tools 的 MSVC x64 编译器和 Windows SDK 已安装并通过验证。
@@ -30,8 +30,7 @@
 
 ### 当前阶段
 
-当前处于：`M0.4` SQLite 初始化和迁移实现完成，下一步是 `M0.5`
-日志、错误和启动状态。
+当前处于：`M0.7` 本地实现完成，等待 GitHub Actions 首次运行后完成 M0 远程验收。
 
 ### M0.0 验证记录
 
@@ -76,13 +75,52 @@
 - 首个迁移只创建 `nexus_metadata` 元数据表，不创建文件索引或正文表。
 - 已覆盖新建数据库、重复初始化、未知版本和不可访问路径错误。
 
+### M0.5 实现记录
+
+- Tauri 启动时将 `tracing` 输出到 stderr；日志只记录固定消息和安全的
+  `error_kind`，不记录文件内容、文件名、搜索词或完整用户路径。
+- `nexus-core` 已提供 `initialize(path)` 和 `CoreError`，负责传播数据库初始化
+  结果，并提供非敏感的错误分类和中文用户说明。
+- 桌面壳层使用 Tauri 应用数据目录，创建本地数据目录后初始化
+  `nexus.sqlite3`；失败时进入 `degraded`，不会静默继续。
+- 已加入 `get_startup_status` 命令，返回 `ready` 或 `degraded` 及非敏感中文
+  说明；前端先显示 `loading`，再切换到对应状态。
+- 已覆盖核心初始化成功、数据库错误安全映射、前端就绪状态和前端降级状态。
+- 本单元新增 `serde`、`tracing` 和 `tracing-subscriber` 直接依赖；未引入
+  异步运行时、持久化日志或云端服务。
+
+### M0.6 实现记录
+
+- 保留并验证 `nexus-db` 的隔离临时目录测试：新建数据库、重复初始化、未知
+  schema 版本和不可访问路径均有覆盖。
+- 保留并验证 `nexus-core` 的初始化成功与数据库错误传播测试，并检查错误展示
+  不包含完整测试路径。
+- React 页面通过 mock 的 `invoke("get_startup_status")` 覆盖 loading、ready、
+  command 主动返回 degraded、command 拒绝和非法响应五类状态。
+- 前端测试只使用 Vitest、jsdom 和内存 mock，不触碰真实用户目录或桌面数据库。
+- M0.6 没有新增生产依赖、数据库表或运行时功能。
+
+### M0.7 实现记录
+
+- 已加入全中文 `README.md`，记录系统要求、安装、开发、检查、构建、架构、
+  隐私边界和当前限制。
+- 已将 Tauri CLI 加入 `apps/desktop` 的开发依赖，锁定在 pnpm lockfile 中，
+  新终端不需要全局安装 Tauri CLI。
+- 已加入 `.github/workflows/ci.yml`：Ubuntu 执行前端和 Rust 核心检查，Windows
+  执行前端构建并编译 Tauri 桌面 crate。
+- 已加入 M0 架构决策记录，并修正旧文档中对实际编号文件名的引用。
+- 本地已模拟 README 与 CI 的全部命令并通过；GitHub Actions 尚未远程运行，需
+  在提交并推送后完成最后验收。
+
 ### 初始同步状态
 
 - 当前规划文档已经同步到 GitHub 远程仓库的 `main` 分支。
-- 本次 M0.0 验证记录目前仅在本地工作区，待人工 review 后再决定是否提交和同步。
-- 当前已确认并实现 pnpm workspace、Tauri 2、`rusqlite + bundled` 和
-  `nexus-core` / `nexus-db` 的最小结构；日志、失败状态和 CI 平台细节仍待后续单元确认。
-- 除规划文档外，不提交源码、依赖目录、构建产物或用户数据。
+- M0.0–M0.4 的源码、锁文件和工程文档已提交并同步到 GitHub `main`；M0.5–M0.7
+  当前在本地工作区，待 review 后再决定是否提交和同步。
+- 当前已确认并实现 pnpm workspace、Tauri 2、`rusqlite + bundled`、启动日志、
+  降级状态、CI 配置和 `nexus-core` / `nexus-db` 的最小结构；远程 CI 首跑仍待
+  提交后确认。
+- 不提交依赖目录、构建产物、日志文件或用户数据。
 
 ## 1. 执行原则
 
@@ -325,7 +363,7 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - CI 自动执行 format、lint、typecheck、test 和 build。
 - Windows CI 至少完成一次 Tauri 编译。
 - README 说明系统依赖、安装、开发、测试、lint 和 build。
-- 文档不再引用不存在的 `ARCHITECTURE.md` 或 `ROADMAP.md` 文件名。
+- 文档统一使用仓库中实际存在的编号文件名。
 
 ### M0 完成门槛
 
@@ -784,5 +822,6 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 
 ## 15. 当前下一步
 
-M0.0、M0.1、M0.2、M0.3 和 M0.4 已完成。下一步只执行 `M0.5`，实现
-日志、基础错误传播和启动状态；不提前实现文件扫描、正文解析或搜索功能。
+M0.0、M0.1、M0.2、M0.3、M0.4、M0.5、M0.6 和 M0.7 的本地实现已完成。下一步
+是提交后确认 GitHub Actions 首次运行；CI 通过后再进入 M1，不提前实现文件扫描、
+正文解析或搜索功能。

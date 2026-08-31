@@ -125,6 +125,19 @@ pub enum DatabaseError {
     },
 }
 
+impl DatabaseError {
+    /// 返回可安全写入日志的错误分类，不包含路径、SQL 或 SQLite 原始信息。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "database_open",
+            Self::ReadSchemaVersion { .. } => "database_schema_read",
+            Self::InvalidSchemaVersion { .. } => "database_schema_invalid",
+            Self::UnsupportedSchemaVersion { .. } => "database_schema_unsupported",
+            Self::Migration { .. } => "database_migration",
+        }
+    }
+}
+
 impl fmt::Display for DatabaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
