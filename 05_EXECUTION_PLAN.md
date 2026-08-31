@@ -18,22 +18,70 @@
 
 ### 当前仓库现状
 
-- 当前只有项目文档，没有前端源码、Rust workspace、SQLite 层、测试、README 或 CI。
+- 已有 React/Vite 前端和 Tauri 2 桌面壳层，Rust workspace 已包含 desktop、
+  `nexus-core` 和 `nexus-db` 三个当前 crate。
+- 启动初始化、README 和 CI 仍待后续 M0 单元完成；SQLite 层已在 M0.4
+  建立最小初始化和迁移能力。
 - Node.js 和 pnpm 已存在。
-- Rust、Cargo、Rustup 当前不可用。
+- stable MSVC Rust toolchain、Rustfmt 和 Clippy 已安装并通过验证。
+- Visual Studio 2022 Build Tools 的 MSVC x64 编译器和 Windows SDK 已安装并通过验证。
 - 文档已统一放置在实际 Git 根目录；后续项目文件也应直接放在该根目录下。
 - 初始同步前 Git 仓库没有 commit 和远程配置；当前已创建 `main` 初始提交并配置 GitHub `origin`。
 
 ### 当前阶段
 
-当前处于：`Research / Plan`。
+当前处于：`M0.4` SQLite 初始化和迁移实现完成，下一步是 `M0.5`
+日志、错误和启动状态。
 
-尚未进入实现阶段。进入 M0 前，仍必须确认包管理器、SQLite Rust 驱动和测试范围等架构决定。
+### M0.0 验证记录
+
+- Node.js：`v22.23.2`
+- pnpm：`11.19.0`
+- Rust：`rustc 1.98.0`，active toolchain 为 `stable-x86_64-pc-windows-msvc`
+- Cargo：`1.98.0`
+- Rustfmt：`1.9.0-stable`
+- Clippy：`0.1.98`
+- MSVC：Visual Studio 2022 Build Tools，x64 编译器可用
+- Git 根目录和工作区状态已验证；环境验证开始时没有未提交变更
+
+### M0.1 配置记录
+
+- 已创建根 `package.json`、`pnpm-workspace.yaml` 和 `pnpm-lock.yaml`。
+- 已创建根 `Cargo.toml`、`Cargo.lock` 和 `rust-toolchain.toml`。
+- 已创建 `.gitignore`，忽略依赖目录、构建产物、本地数据库和日志。
+- 已提供前端与 Rust 的 format、lint、typecheck、test、build 根级命令入口。
+- 当前 workspace 已包含首批 Rust crate；M0.3 不再创建未来阶段的占位 crate。
+
+### M0.2 实现记录
+
+- 已创建 `apps/desktop` React + TypeScript + Vite 前端。
+- 已创建 Tauri 2 desktop crate、最小 capability 和 Vite 开发服务器连接配置。
+- v0 界面、页面标题和窗口标题使用简体中文；核心逻辑仍未进入 UI。
+- 前端 format、lint、typecheck、test、build 和 Tauri `cargo check --workspace`
+  均已通过。
+
+### M0.3 实现记录
+
+- 已创建 `crates/nexus-core` 和 `crates/nexus-db` library crate。
+- 已固定依赖方向：`nexus-desktop → nexus-core → nexus-db`。
+- `nexus-core` 和 `nexus-db` 不依赖 Tauri。
+- 本单元不引入 SQLite 驱动、数据库 schema、迁移或未来阶段的空 crate。
+
+### M0.4 实现记录
+
+- `nexus-db` 已采用 `rusqlite 0.40.2` 的 `bundled` 功能，SQLite 随 Rust
+  依赖构建，不依赖系统 SQLite 安装。
+- 已提供 `initialize_database(path)`，路径由调用方传入，不依赖 Tauri。
+- 已添加 `0001_foundation.sql` 和 `PRAGMA user_version` 版本控制。
+- 首个迁移只创建 `nexus_metadata` 元数据表，不创建文件索引或正文表。
+- 已覆盖新建数据库、重复初始化、未知版本和不可访问路径错误。
 
 ### 初始同步状态
 
 - 当前规划文档已经同步到 GitHub 远程仓库的 `main` 分支。
-- 同步不代表 M0 已开始，也不代表任何技术选型已经全部批准。
+- 本次 M0.0 验证记录目前仅在本地工作区，待人工 review 后再决定是否提交和同步。
+- 当前已确认并实现 pnpm workspace、Tauri 2、`rusqlite + bundled` 和
+  `nexus-core` / `nexus-db` 的最小结构；日志、失败状态和 CI 平台细节仍待后续单元确认。
 - 除规划文档外，不提交源码、依赖目录、构建产物或用户数据。
 
 ## 1. 执行原则
@@ -736,14 +784,5 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 
 ## 15. 当前下一步
 
-仓库根目录已经统一。开始代码实现前，仍由项目负责人确认：
-
-1. 是否采用 pnpm workspace。
-2. 是否采用 Tauri 2。
-3. 是否采用 `rusqlite + bundled`。
-4. M0 是否暂缓 Playwright。
-5. CI 的目标平台。
-6. M0 的日志和数据库失败行为。
-7. 是否只创建 `nexus-core` 与 `nexus-db`。
-
-确认后，只执行 `M0.0`，完成工具链和仓库基线，再进入 `M0.1`。
+M0.0、M0.1、M0.2、M0.3 和 M0.4 已完成。下一步只执行 `M0.5`，实现
+日志、基础错误传播和启动状态；不提前实现文件扫描、正文解析或搜索功能。

@@ -1,0 +1,11 @@
+[package]
+name = "nexus-db"
+version = "0.1.0"
+description = "Nexus 本地元数据存储边界"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,28 @@
+{
+  "name": "nexus",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.23.2"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @nexus/desktop run tauri:dev",
+    "dev:web": "pnpm --filter @nexus/desktop run dev",
+    "format": "pnpm run format:frontend && pnpm run format:rust",
+    "format:frontend": "pnpm --filter @nexus/desktop run format",
+    "format:rust": "cargo fmt --all -- --check",
+    "lint": "pnpm run lint:frontend && pnpm run lint:rust",
+    "lint:frontend": "pnpm --filter @nexus/desktop run lint",
+    "lint:rust": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "typecheck": "pnpm run typecheck:frontend && pnpm run typecheck:rust",
+    "typecheck:frontend": "pnpm --filter @nexus/desktop run typecheck",
+    "typecheck:rust": "cargo check --workspace",
+    "test": "pnpm run test:frontend && pnpm run test:rust",
+    "test:frontend": "pnpm --filter @nexus/desktop run test",
+    "test:rust": "cargo test --workspace",
+    "build": "pnpm run build:frontend && pnpm run build:rust",
+    "build:frontend": "pnpm --filter @nexus/desktop run build",
+    "build:rust": "cargo build --workspace"
+  }
+}

@@ -44,6 +44,38 @@ nexus/
 └── .github/workflows/
 ```
 
+## M0 实际 Rust 骨架
+
+M0.3 只创建当前需要的三个 Rust crate，不提前创建 parser、index 或
+search crate：
+
+``` text
+apps/desktop/src-tauri/  # Tauri desktop 壳层
+crates/nexus-core/       # 与 UI 和平台无关的核心边界
+crates/nexus-db/         # 本地数据库边界
+```
+
+依赖方向固定为：
+
+``` text
+nexus-desktop → nexus-core → nexus-db
+```
+
+`nexus-core` 和 `nexus-db` 不依赖 Tauri。M0.3 不定义数据库连接或业务
+模型；SQLite 初始化和迁移由 M0.4 单独实现。
+
+## M0.4 数据库边界
+
+`crates/nexus-db` 对外只提供按调用方传入路径初始化数据库的入口：
+
+- `initialize_database(path)` 负责打开数据库、读取 `PRAGMA user_version`
+  并执行待处理迁移。
+- 当前 schema 版本为 `1`，迁移文件为
+  `crates/nexus-db/migrations/0001_foundation.sql`。
+- 首个迁移只创建 `nexus_metadata(key, value)`，不包含文件索引或正文。
+- 新数据库的迁移和版本更新在同一个事务中完成；未知版本返回明确错误。
+- 数据库 crate 不假设 Tauri app data directory，生产路径由上层调用方决定。
+
 ## 领域边界
 
 -   UI 不直接承担数据库/索引业务逻辑。

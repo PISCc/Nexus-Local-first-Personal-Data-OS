@@ -1,0 +1,25 @@
+# JavaScript and pnpm
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+
+# Rust and Tauri
+target/
+apps/desktop/src-tauri/gen/
+
+# Local databases and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Local configuration and operating-system files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

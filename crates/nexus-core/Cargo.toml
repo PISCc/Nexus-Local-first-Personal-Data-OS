@@ -1,0 +1,11 @@
+[package]
+name = "nexus-core"
+version = "0.1.0"
+description = "Nexus 本地优先核心边界"
+edition = "2021"
+
+[dependencies]
+nexus-db = { path = "../nexus-db" }
+
+[lib]
+path = "src/lib.rs"
