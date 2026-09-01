@@ -424,6 +424,387 @@ select {
   background: var(--line);
 }
 
+.rescan-workspace {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.8fr);
+  gap: 52px;
+  padding: 48px 0 54px;
+  border-top: 1px solid var(--line);
+}
+
+.rescan-heading {
+  align-self: start;
+}
+
+.rescan-heading h2 {
+  max-width: 210px;
+  margin: 14px 0 18px;
+  color: var(--ink);
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  font-weight: 620;
+  letter-spacing: -0.07em;
+  line-height: 0.98;
+  text-wrap: pretty;
+}
+
+.rescan-heading > p:last-child {
+  max-width: 230px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.rescan-card {
+  min-width: 0;
+  padding: 25px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: 14px 14px 0 rgba(32, 41, 35, 0.06);
+}
+
+.rescan-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rescan-card-index {
+  color: var(--moss);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.13em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.rescan-card h3 {
+  margin: 12px 0 0;
+  color: var(--ink);
+  font-size: clamp(1.3rem, 2.5vw, 1.85rem);
+  font-weight: 620;
+  letter-spacing: -0.055em;
+  line-height: 1.05;
+}
+
+.scan-phase {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  padding-top: 2px;
+  color: var(--moss-dark);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.scan-phase-starting,
+.scan-phase-running,
+.scan-phase-cancelling {
+  color: var(--moss-dark);
+}
+
+.scan-phase-starting .status-dot,
+.scan-phase-running .status-dot,
+.scan-phase-cancelling .status-dot {
+  animation: status-pulse 1.5s ease-in-out infinite;
+}
+
+.scan-phase-cancelling,
+.scan-phase-cancelled,
+.scan-phase-failed {
+  color: var(--amber);
+}
+
+.scan-phase-cancelling .status-dot,
+.scan-phase-cancelled .status-dot,
+.scan-phase-failed .status-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(188, 143, 78, 0.16);
+}
+
+.scan-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.path-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.path-label span,
+.path-help,
+.scan-task-id {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  line-height: 1.5;
+}
+
+.path-label span {
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.path-entry {
+  display: flex;
+  min-height: 50px;
+  border: 1px solid var(--line-strong);
+  background: rgba(251, 250, 247, 0.8);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.path-entry:focus-within {
+  border-color: var(--moss);
+  box-shadow: 4px 4px 0 rgba(79, 107, 88, 0.12);
+}
+
+.path-prefix {
+  display: grid;
+  width: 44px;
+  flex: 0 0 44px;
+  place-items: center;
+  color: var(--moss);
+  border-right: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.path-input {
+  min-width: 0;
+  flex: 1;
+  padding: 0 15px;
+  color: var(--ink);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.path-input::placeholder {
+  color: #9a9f98;
+}
+
+.path-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.path-help {
+  margin: -1px 0 6px;
+}
+
+.scan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.button:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+}
+
+.button:active:not(:disabled) {
+  transform: translate(0, 0);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.button-primary {
+  color: var(--surface);
+  background: var(--moss);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--moss-dark);
+}
+
+.button-secondary {
+  color: var(--moss-dark);
+  border-color: rgba(79, 107, 88, 0.35);
+  background: rgba(79, 107, 88, 0.06);
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: var(--moss);
+  background: rgba(79, 107, 88, 0.12);
+}
+
+.scan-progress-block {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.scan-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scan-progress-heading strong {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.progress-track {
+  position: relative;
+  height: 8px;
+  margin-top: 14px;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: var(--moss);
+}
+
+.progress-track-starting .progress-fill,
+.progress-track-running .progress-fill,
+.progress-track-cancelling .progress-fill {
+  width: 32%;
+  animation: progress-slide 1.6s ease-in-out infinite;
+}
+
+.progress-track-completed .progress-fill {
+  width: 100%;
+}
+
+.progress-track-cancelled .progress-fill,
+.progress-track-failed .progress-fill {
+  background: var(--amber);
+}
+
+.scan-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.scan-metrics > div,
+.result-grid > div {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.scan-metrics span,
+.result-grid span {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.scan-metrics strong,
+.result-grid strong {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 550;
+  letter-spacing: -0.06em;
+}
+
+.scan-result {
+  margin-top: 24px;
+  padding-top: 19px;
+  border-top: 1px solid var(--line);
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.scan-result-note {
+  margin: 24px 0 0;
+  padding-top: 19px;
+  color: var(--amber);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.scan-task-id {
+  display: block;
+  margin-top: 20px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-115%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
 .principles {
   display: grid;
   grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.8fr);
@@ -596,6 +977,20 @@ select {
     max-width: 580px;
   }
 
+  .rescan-workspace {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+
+  .rescan-heading h2,
+  .rescan-heading > p:last-child {
+    max-width: 580px;
+  }
+
+  .rescan-card {
+    max-width: 580px;
+  }
+
   .principles {
     grid-template-columns: 1fr;
     gap: 32px;
@@ -643,6 +1038,42 @@ select {
   .status-card-footer {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .rescan-card {
+    padding: 22px 19px 19px;
+  }
+
+  .rescan-card-header {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .path-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .path-input {
+    padding-right: 10px;
+    padding-left: 11px;
+    font-size: 11px;
+  }
+
+  .scan-actions .button {
+    flex: 1;
+  }
+
+  .scan-progress-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .result-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
   }
 
   .footer-rule {
