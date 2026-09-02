@@ -1,10 +1,11 @@
 # Nexus 执行方案
 
-> 文档状态：规划稿
+> 文档状态：执行记录与后续规划
 >
-> 当前主目标：先完成 M0–M4，交付一个可靠的本地文件全文搜索工具。
+> 当前主目标：维护 M0–M4 的可靠本地文件全文搜索，并完成已启动的 M5 向量混合检索基线。
 >
-> 约束：M0 未验收前，不进入 M1；M4 未形成稳定产品前，不主动实现 AI、Agent 或复杂扩展架构。
+> 当前约束：按里程碑顺序推进；M4 已形成稳定产品，M5 只完成本地基线验证，不在未做模型决策前引入
+> 预训练模型、云端 API、Agent 或复杂扩展架构。
 
 > 产品判断：M0–M4 就是第一个可实用版本；M5–M8 是在真实使用需求和评估结果支持下再决定的后续版本，不是必须完成的交付条件。
 
@@ -15,22 +16,24 @@
 - 已完成项目目标、路线图、架构和 M0 规格的阅读与初步分析。
 - 已确认 Nexus 的长期方向是 Local-first Personal Data OS。
 - 已确认第一阶段最有价值的产品终点应是 M0–M4：本地文件索引、正文解析、全文搜索和增量更新。
+- 已完成 M5.0–M5.4 的本地向量混合检索工程基线；真正的预训练模型仍等待单独的产品和运行时决策。
 
 ### 当前仓库现状
 
 - 已有 React/Vite 前端和 Tauri 2 桌面壳层，Rust workspace 已包含 desktop、
   `nexus-core` 和 `nexus-db` 三个当前 crate。
-- README、CI 和架构决策已在 M0.7 加入；SQLite 层已在 M0.4 建立最小初始化和
-  迁移能力，M0.5 已接入启动检查和降级状态。
+- README、CI 和架构决策已建立；SQLite 已升级到 schema 5，当前包含
+  `nexus_metadata`、`file_metadata`、canonical `documents`、`documents_fts`、模型登记和本地
+  `document_embeddings`，启动检查、文件扫描、重扫和增量监听界面均已接入。
 - Node.js 和 pnpm 已存在。
 - stable MSVC Rust toolchain、Rustfmt 和 Clippy 已安装并通过验证。
 - Visual Studio 2022 Build Tools 的 MSVC x64 编译器和 Windows SDK 已安装并通过验证。
 - 文档已统一放置在实际 Git 根目录；后续项目文件也应直接放在该根目录下。
-- 初始同步前 Git 仓库没有 commit 和远程配置；当前已创建 `main` 初始提交并配置 GitHub `origin`。
+- Git 仓库已配置 `main` 分支和 GitHub `origin`；M0–M2.0 的实现与文档已完成一次提交并推送。
 
 ### 当前阶段
 
-当前处于：`M2.0` 最小 Document 模型已完成，下一步进入 `M2.1` 纯文本、Markdown 和代码解析。
+当前处于：`M5.0–M5.4` 本地向量混合检索基线完成，M5 评估已通过；M6 尚未开始。
 
 ### M0.0 验证记录
 
@@ -41,7 +44,7 @@
 - Rustfmt：`1.9.0-stable`
 - Clippy：`0.1.98`
 - MSVC：Visual Studio 2022 Build Tools，x64 编译器可用
-- Git 根目录和工作区状态已验证；环境验证开始时没有未提交变更
+- Git 根目录和工作区状态已验证；这是 M0.0 开始时的基线记录。
 
 ### M0.1 配置记录
 
@@ -173,13 +176,77 @@
 - `DocumentSource::LocalFile` 要求非空路径，转为绝对路径，并复用 `nexus-db` 的跨平台路径规范化规则；不做 `canonicalize`，避免把模型绑定到文件当前是否存在。
 - 已加入非空 ID、非空标题、有效 1-based 行范围和非空来源路径校验；错误分类不会回显用户正文或完整路径。
 - 已覆盖本地文件模型构造、空正文、位置范围和非法输入测试；本阶段不实现具体 Parser，不增加第三方依赖。
-- 已新增决策记录 `docs/decisions/0007-m2-document-model.md`。
+- 已新增决策记录 `docs/decisions/0007-m2-document-model.md` 和验收记录
+  `docs/acceptance/0002-m2-document-model.md`。
 
-### 初始同步状态
+### M2.1 实现记录
 
-- 当前规划文档已经同步到 GitHub 远程仓库的 `main` 分支。
-- M0.0–M0.7 的源码、锁文件和工程文档已提交并同步到 GitHub `main`；M1.0–M2.0
-  当前在本地工作区，待 review 后再决定是否提交和同步。
+- 已在 `crates/nexus-core/src/parser.rs` 增加单文件 `parse_local_file`，由调用方提供
+  `DocumentId`、本地路径和最大字节数；未创建通用 Parser trait 或 parser crate。
+- 支持 `txt`、`md`、`py`、`rs`、`js`、`ts`、`java`、`cpp`，扩展名大小写不敏感；Markdown
+  和代码按普通 UTF-8 文本读取，不进行 AST 解析或格式化。
+- 使用文件元数据检查和有界读取拒绝超过上限的文件；只移除开头 UTF-8 BOM，保持其余正文
+  和换行不变；标题使用完整文件名，位置使用 `whole_document`。
+- 已增加安全的 `ParseError` 分类，覆盖格式、元数据、普通文件、打开、读取、大小限制、
+  UTF-8 和 Document 构造失败；展示消息不包含路径、文件名或正文。
+- `nexus-core` 解析器不写 SQLite、不接入 Tauri 或 UI，不新增第三方依赖；M2.2 JSON、
+  PDF、DOCX、HTML 和全文搜索仍未开始。
+- 已新增决策记录 `docs/decisions/0008-m2-content-parser.md` 和验收记录
+  `docs/acceptance/0003-m2-content-parser.md`。
+
+### M2.2 实现记录
+
+- 已在 `crates/nexus-core/src/parser.rs` 增加单文件 `parse_json_file`，由调用方提供
+  `DocumentId`、本地路径、最大字节数和最大嵌套深度，并从 `nexus-core` 公共导出。
+- 已增加直接依赖 `serde_json 1.0.151`；只接受扩展名大小写不敏感的 `.json` 普通文件，
+  严格校验 UTF-8 并只移除开头 BOM。
+- JSON 合法性通过后生成统一 `Document`，正文保留去除 BOM 后的原始空白、换行、缩进
+  和字段顺序；不执行格式化、字段抽取或 schema 校验。
+- `max_bytes` 复用 M2.1 的有界文件读取；`max_depth` 以根标量为 0、容器层级递增，
+  超限返回独立的 JSON 深度错误。malformed JSON 返回独立的安全分类。
+- 已覆盖合法 JSON、原始正文、大小写扩展名、根标量深度、超深 JSON、malformed JSON
+  和不支持扩展名；解析器仍不写 SQLite、不接入 Tauri/React、不实现批量调度。
+- 已新增决策记录 `docs/decisions/0009-m2-json-parser.md` 和验收记录
+  `docs/acceptance/0004-m2-json-parser.md`。
+
+### M2.3a 实现记录
+
+- 已在 `crates/nexus-core/src/parser/html.rs` 增加单文件 `parse_html_file`，由调用方提供
+  `DocumentId`、本地路径、原始输入字节上限和提取后输出字节上限，并从 `nexus-core`
+  公共导出。
+- 已增加直接依赖 `dom_query 0.27.0`；该版本已经存在于工作区锁文件，HTML 解析使用
+  HTML5 容错规则，不手写 HTML tokenizer，也不建立新的通用 Parser trait。
+- 只接受大小写不敏感的 `.html` / `.htm` 普通文件，严格校验 UTF-8 并只移除开头 BOM；
+  `script`、`style`、`noscript` 和 `template` 内容被排除，正文由可见文本和块边界规范化生成。
+- 输入文件使用 M2.1 的有界读取；提取结果超过调用方输出上限时返回独立的
+  `parse_output_too_large` 安全分类。标题使用完整文件名，位置使用
+  `whole_document`，不改变 `Document` 模型。
+- 已覆盖 HTML 可见文本、非内容元素、实体、大小写扩展名、malformed HTML、BOM、无效
+  UTF-8、零限制和输出超限；解析器仍不写 SQLite、不接入 Tauri/React、不实现批量调度。
+- 已新增决策记录 `docs/decisions/0010-m2-html-parser.md` 和验收记录
+  `docs/acceptance/0005-m2-html-parser.md`。
+
+### M2.3b 实现记录
+
+- 已在 `crates/nexus-core/src/parser/docx.rs` 增加单文件 `parse_docx_file`，由调用方提供
+  `DocumentId`、本地路径、原始 ZIP 字节上限、主文档 XML 条目上限和提取后输出字节上限，
+  并从 `nexus-core` 公共导出。
+- 已增加直接依赖 `zip 8.6.0`（仅启用 `deflate-flate2-zlib-rs`）和 `quick-xml 0.41.0`；
+  DOCX 只读取 `word/document.xml`，不把 ZIP 条目解压到文件系统。
+- 只接受大小写不敏感的 `.docx` 普通文件；ZIP 无效、主文档条目缺失/非文件、条目超限、
+  XML 无效和输出超限均返回独立安全分类。XML 文本支持实体、段落、换行和制表符。
+- 标题使用完整文件名，位置使用 `whole_document`，不改变 `Document` 模型；不执行宏、
+  不读取页眉/页脚/批注/关系目标，不写 SQLite、不接入 Tauri/React、不实现批量调度。
+- 已覆盖 Deflate DOCX fixture、实体、大小写扩展名、ZIP 无效、主文档缺失、条目上限、
+  输出上限、malformed XML 和安全错误展示。
+- 已新增决策记录 `docs/decisions/0011-m2-docx-parser.md` 和验收记录
+  `docs/acceptance/0006-m2-docx-parser.md`。
+
+### GitHub 同步状态
+
+- GitHub 远程仓库为 `https://github.com/PISCc/Nexus-Local-first-Personal-Data-OS.git`。
+- 已推送提交 `18b1d6c`，`main` 和 `origin/main` 当时同步，包含 M0.0–M2.0 的源码、测试和工程文档。
+- 本次进度对齐会新增文档修改；完成检查后再单独决定是否创建文档提交并推送。
 - 当前已确认并实现 pnpm workspace、Tauri 2、`rusqlite + bundled`、启动日志、
   降级状态、CI 配置和 `nexus-core` / `nexus-db` 的最小结构；远程 CI 首跑已确认
   通过。
@@ -555,12 +622,17 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 
 ### M2.2：JSON
 
-- 支持合法 JSON 的文本化处理。
-- 明确是否保留原始格式或生成规范化文本。
-- malformed JSON 不终止整个批次。
-- 嵌套深度和文件大小有边界。
+**状态：已完成。**
 
-### M2.3：PDF、DOCX、HTML
+- 通过 `parse_json_file(document_id, path, max_bytes, max_depth)` 支持单文件 JSON
+  文本化处理。
+- 使用 `serde_json` 校验合法性；正文只移除开头 BOM，保留原始格式，不生成规范化文本。
+- malformed JSON 返回固定安全错误，不改变解析器状态，调用方可以继续处理后续文件。
+- `max_bytes` 限制原始文件大小；根标量深度为 0，容器每增加一层深度加 1，超过
+  `max_depth` 返回独立错误。
+- 不实现 JSON schema、字段抽取、批量调度或正文持久化。
+
+### M2.3：PDF、DOCX、HTML（已完成）
 
 这是 M2 的第二阶段，不应阻塞纯文本和代码解析的首次交付。
 
@@ -569,12 +641,50 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 解析库必须先评估体积、许可证和安全性。
 - 恶意或损坏文档不得导致进程崩溃。
 
+#### M2.3a：HTML（已完成）
+
+- 使用 `parse_html_file(document_id, path, max_input_bytes, max_output_bytes)` 生成统一
+  `Document`。
+- 过滤脚本、样式、noscript 和 template 内容，输出确定性的可见文本。
+- 严格 UTF-8、输入文件大小和提取后正文大小均有边界；malformed HTML 使用 HTML5
+  容错规则继续提取可用文本。
+
+#### M2.3b：DOCX（已完成）
+
+- 使用 `parse_docx_file(document_id, path, max_input_bytes, max_entry_bytes, max_output_bytes)`
+  提取 `word/document.xml` 的主文档文本。
+- 先检查 ZIP 条目未压缩大小再读取；使用流式 XML 事件解析，支持段落、换行、制表符和实体。
+- 不解压到文件系统，不执行宏或资源，不读取页眉/页脚/批注/关系目标；不提前扩展
+  `DocumentLocation`。
+
+#### M2.3c：PDF（已完成）
+
+- 使用 `parse_pdf_file(document_id, path, max_input_bytes, max_decompressed_bytes,
+  max_output_bytes)` 在内存中按 PDF 逻辑页序提取文本。
+- 选择 `lopdf 0.44.0`，关闭默认日期、并行和时间特性；使用 `LoadOptions` 和页面有界
+  文本提取 API 限制单个解压流，避免把压缩流无限展开到内存。
+- 非空页面经过边缘空白裁剪后以两个换行连接；结果保持完整文件名和
+  `DocumentLocation::whole_document()`，不扩展页码位置模型。
+- 原始输入、解压流和提取后正文分别受限；PDF 无效、解压流超限、输出超限、零限制、
+  不支持扩展名和解析器异常均返回安全分类。不渲染页面、不执行 OCR、不处理密码、附件
+  或外部资源，不写 SQLite、不接入 Tauri/React、不实现批量调度。
+- 已覆盖多页页序、损坏 PDF、安全错误展示、输入上限、解压流上限、输出上限、扩展名和
+  零限制；新增决策记录 `docs/decisions/0012-m2-pdf-parser.md` 和验收记录
+  `docs/acceptance/0007-m2-pdf-parser.md`。
+
 ### M2.4：M2 验收
 
-- 支持格式能生成统一 Document。
-- 不支持和损坏格式可记录失败。
-- 解析结果可以通过测试 fixture 重现。
-- 不上传文件内容。
+**状态：已完成。**
+
+- 当前支持的纯文本/Markdown/代码、JSON、HTML/HTM、DOCX 和 PDF 入口都能生成统一
+  `Document`，并保持来源、完整文件名、正文和 whole-document 位置边界。
+- 不支持扩展名、缺失或损坏文件、无效编码、结构错误和各类资源超限均通过
+  `ParseError::kind()` 返回可记录的安全分类；错误展示不包含路径、文件名或正文。
+- 每种格式均有隔离临时目录或库生成的可重现 fixture；核心测试、数据库测试、桌面端测试
+  和前端测试均已通过。
+- 解析只在本地内存中完成，不上传文件内容，不写正文 SQLite，不接入 UI 批量调度，不依赖
+  网络或 AI。
+- 正式验收记录见 `docs/acceptance/0008-m2-content-parsing.md`。
 
 ## 7. M3 — Full-text Search
 
@@ -584,14 +694,26 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 
 **目的：** 把文档元数据和正文组织为可查询结构。
 
+**状态：** 已完成。
+
 **成品要求：**
 
-- 文档元数据表和正文索引表职责明确。
+- canonical 文档表和后续正文索引表职责明确。
 - 搜索结果可以追溯到原始文件。
 - Schema migration 可升级。
 - 不在 UI 中拼接 SQL。
 
+**本单元交付：**
+
+- schema 3 的 `documents` canonical 表，保存文档 ID、本地来源路径、标题、正文和可选行范围。
+- `source_path_key` 和 `source_path_display` 双路径表示，支持原始文件追溯和展示。
+- `nexus-db` 的 `DocumentRecord`、`upsert_document`、`get_document` 和 `delete_document`。
+- 按 ID upsert、读写校验、位置范围校验和不回显正文/路径的安全错误分类。
+- M3.0 不创建 FTS5 虚拟表；FTS5 表、tokenizer 和一致性事务属于 M3.1。
+
 ### M3.1：SQLite FTS5 基础索引
+
+**状态：** 已完成。
 
 - 建立正文索引。
 - 支持插入、更新和删除。
@@ -600,42 +722,85 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 先不引入 Tantivy。
 - 只有在基准测试证明 FTS5 无法满足延迟、规模或查询能力要求时，才评估 Tantivy，并通过 ADR 记录决定。
 
+**本单元交付：**
+
+- schema 4 的 `documents_fts` external-content FTS5 表，索引 `title` 和 `body`。
+- 明确使用 `unicode61 remove_diacritics 1`，不新增数据库或搜索引擎依赖。
+- SQLite triggers 维护 canonical 文档插入、更新和删除时的 FTS5 索引。
+- migration 对 M3.0 已存在文档执行 FTS5 rebuild。
+- 测试覆盖新增、更新、删除、旧文档重建、事务回滚和 FTS integrity-check。
+
 ### M3.2：查询语法和过滤器
 
-- keyword。
-- phrase。
-- filename/path。
-- extension/type。
-- date filters。
-- 非法查询返回可理解错误。
+**状态：** 已完成。
+
+- `nexus-db::search_documents` 提供受限查询入口。
+- 支持关键词、多个关键词 AND、双引号短语、文件名、路径、扩展名和文件类型过滤。
+- 支持 modified、created、accessed 日期过滤，以及 `date` modified 别名。
+- 查询值全部绑定，拒绝 raw FTS5 操作符；非法查询、日期、空值和冲突筛选返回安全错误。
+- 结果按文档 ID 稳定排序，单次结果数量限制为 1–1000，不返回完整正文。
+- 测试覆盖关键词、短语、过滤器、日期边界、仅过滤器查询、数量上限和错误分类。
 
 ### M3.3：ranking 和 snippet
 
-- 使用确定性 ranking。
-- 返回匹配片段。
-- 结果排序有测试。
-- 搜索不依赖 LLM。
+**状态：** 已完成。
+
+- 使用 SQLite FTS5 BM25 计算确定性 lexical relevance，标题权重高于正文。
+- relevance 降序排序，文档 ID 作为稳定 tie-break；过滤器-only 查询继续按文档 ID排序。
+- 使用 FTS5 `snippet()` 返回最多 32 tokens 的纯文本命中片段，使用 `⟦` / `⟧` 标记。
+- `SearchResult` 返回可选 relevance 和 snippet，不返回完整正文。
+- 测试覆盖标题/正文权重、tie-break、snippet 和过滤器-only 行为。
 
 ### M3.4：搜索 UI
+
+**状态：** 已完成。
 
 - 输入查询。
 - 显示结果、路径、类型、时间和 snippet。
 - 处理 loading、空结果、错误和取消。
-- 点击结果可以定位或打开原始文件，但权限和安全策略必须明确。
+- 点击结果可以通过平台系统打开器打开原始文件；命令校验文件存在性，失败返回安全错误。
+- 默认进入搜索页，M1 文件索引页和重扫流程继续保留；UI 只通过 Tauri 命令访问数据库能力。
+- 搜索结果 DTO 不返回完整正文；前端以纯文本节点渲染 snippet，不解释 HTML。
+- 前端请求 ID 使取消后的迟到结果失效，但不引入数据库中断或持久连接架构。
+- 测试覆盖默认搜索页、侧栏导航、查询结果、空结果、错误、取消和打开文件命令映射。
+- 决策记录：`docs/decisions/0017-m3-search-ui.md`；验收记录：`docs/acceptance/0013-m3-search-ui.md`。
 
 ### M3.5：搜索质量评估
 
-- 建立小型固定语料库。
-- 建立真实查询集和相关性标注。
-- 记录查询延迟、索引大小和召回情况。
-- 对比修改前后的结果。
+**状态：** 已完成。
+
+- 增加 `crates/nexus-db/tests/search_quality.rs` 离线评估 harness，不读取真实用户资料，不增加生产 API 或依赖。
+- 固定 10 条代表性文档和 9 个带人工相关性标注的查询；以 M3.2 文档 ID 顺序作为同候选集基线。
+- 记录 Recall@3、Top-1 命中、每个查询 15 次测量的中位/p95 延迟、SQLite 文件大小和 FTS5 segment bytes。
+- 本次结果：BM25 macro Recall@3 `0.9722`，基线 `0.9444`；测试要求当前值不低于基线。
+- 决策记录：`docs/decisions/0018-m3-search-quality.md`；验收记录：`docs/acceptance/0014-m3-search-quality.md`。
 
 ### M3.6：M3 验收
+
+**状态：** 已完成。
 
 - 可以搜索正文，不只是文件名。
 - 支持关键词、短语和基本过滤器。
 - 结果带 snippet 和原文件引用。
 - 查询性能和质量有记录。
+
+**本单元实现：**
+
+- `nexus-core::index_directory` / `index_directory_with_control` 复用 M1 流式扫描和取消
+  边界，按文件扩展名分派 M2 已验收的单文件解析器，并将 `Document` 转为
+  `nexus-db::DocumentRecord` 写入 canonical 表；SQLite FTS trigger 自动维护正文索引。
+- `ParseOptions::default()` 固定初始索引的有界读取策略：普通输入/输出 16 MiB、PDF 解压
+  流 64 MiB、DOCX 主文档条目 16 MiB、JSON 深度 32。此处不增加解析格式或依赖。
+- 不支持格式计入 `documents_skipped`，单文件解析错误计入 `documents_failed` 并继续；文档
+  持久化错误返回任务级错误。初始文档 ID 使用规范化路径的稳定 FNV-1a `file:<hex>` 表示，
+  不在 ID 中暴露用户路径。
+- `start_rescan` 增加默认关闭的 `indexContent` 请求字段；桌面文件索引页显式打开它，保持
+  既有 core metadata-only `rescan_directory_with_control` 调用方兼容。进度和完成事件增加
+  正文写入、失败和格式跳过统计。
+- 取消时停止后续扫描；已提交的单文档正文与 FTS 保持原子一致，尚未完成的元数据重扫不
+  进入最终应用事务。文件变化检测、陈旧正文清理和 watcher 不属于本单元，留给 M4。
+- 验收记录见 `docs/acceptance/0015-m3-acceptance.md`，架构决策见
+  `docs/decisions/0019-m3-initial-content-index.md`。
 
 ## 8. M4 — Incremental Indexing
 
@@ -651,6 +816,18 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - hash 只用于确实需要的情况。
 - 修改中的文件不会被错误地当成稳定内容。
 
+**本单元实现：**
+
+- `nexus-core` 增加 `FileSnapshot` 和 `detect_file_changes`，比较上次与本次快照并输出
+  新增、修改、未变化和消失四类结果。
+- 当前只使用路径、大小和修改时间；两侧均有相同修改时间且大小相同才判定为未变化。
+  修改时间缺失时保守地归入修改，避免把无法确认稳定性的文件跳过。
+- 结果按路径排序；空路径和同一输入侧重复路径返回安全错误，不静默覆盖输入。
+- 本单元不读取正文、不计算 hash、不写数据库、不引入 watcher；监听、事件归并和自动
+  更新留给后续 M4.1–M4.4。
+- 决策记录：`docs/decisions/0020-m4-change-detection.md`；验收记录：
+  `docs/acceptance/0016-m4-change-detection.md`。
+
 ### M4.1：文件事件接入
 
 - CREATE。
@@ -659,12 +836,39 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - MOVE/rename。
 - 事件来源与扫描逻辑解耦。
 
+**本单元实现：**
+
+- `nexus-core` 使用稳定版 `notify 8.2.0` 增加递归 `watch_directory`，底层平台通知不
+  直接进入扫描或数据库逻辑。
+- 统一输出 `FileEvent` 的创建、修改、删除、重命名和 `RescanRequired`；监听根目录之外
+  的事件被过滤，移入/移出范围的移动分别转换为新增/删除。
+- 支持底层一次提供两端路径的重命名，以及连续 From/To 通知的基础配对；事件丢失信号
+  转换为完整重扫请求。
+- `FileWatcher` 生命周期控制底层监听，调用方通过有界等待或非阻塞读取消费事件；监听
+  回调不读取正文、不写数据库。
+- 本单元不实现去重、防抖、文件稳定性等待、批处理或自动更新；这些内容留给 M4.2–M4.4。
+- 决策记录：`docs/decisions/0021-m4-file-event-source.md`；验收记录：
+  `docs/acceptance/0017-m4-file-event-source.md`。
+
 ### M4.2：去重、debounce 和批处理
 
 - 合并短时间内重复事件。
 - 不重复解析同一文件。
 - 事件顺序异常时最终状态正确。
 - 批处理失败可重试。
+
+**本单元实现：**
+
+- `nexus-core` 增加 `EventBatcher`，以 250ms 安静窗口和 128 路径上限合并事件；同一路径
+  只保留最终操作，重命名拆成旧路径移除和新路径更新，完整重扫信号覆盖局部事件。
+- 增量更新在解析前后重新确认文件元数据；文件仍在变化时有限等待并重试，解析失败保留
+  既有正文，不把半截内容写入 canonical 文档。
+- `nexus-db` 增加 `apply_file_mutations`，在一个事务中同时更新文件元数据、canonical
+  文档及 FTS 一致性；事务失败时整个批次回滚并最多重试两次。
+- 已覆盖重复事件、异常顺序、重命名、完整重扫、创建/更新/删除、重复文档行和损坏正文
+  保留旧内容等边界。
+- 决策记录：`docs/decisions/0022-m4-event-coalescing-and-batch-write.md`；验收记录：
+  `docs/acceptance/0018-m4-event-coalescing-and-batch-write.md`。
 
 ### M4.3：后台任务和关闭
 
@@ -673,6 +877,19 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 应用关闭时停止接收新事件。
 - 未完成批次不会破坏数据库一致性。
 
+**本单元实现：**
+
+- 桌面层增加单活动 `WatchManager`，在独立线程中持有 watcher、事件归并器和增量处理
+  任务；UI 通过 `get_watch_status` 及安全事件接收状态，不直接参与事件等待或数据库写入。
+- 监听任务复用 `RescanControl`，并使用关闭标记停止接收新事件；停止时等待线程退出，
+  让未提交批次继续受 M4.2 的事务边界保护。
+- 增量批次暂时无法提交时保留批次并延迟重试；单文件失败只计入统计，不上传路径、正文
+  或底层错误文本。
+- 初始正文索引成功后保存监听根目录；启动时对已保存目录先做一次完整恢复，再开始监听。
+- 前端增加自动同步状态、最近一次增量统计和 payload 校验；浏览器预览仍可安全降级。
+- 决策记录：`docs/decisions/0023-m4-background-watch-task.md`；验收记录：
+  `docs/acceptance/0019-m4-background-watch-task.md`。
+
 ### M4.4：M4 验收
 
 - 创建、修改、删除和移动文件后索引最终一致。
@@ -680,22 +897,45 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 重复事件不会产生重复记录。
 - 关闭和重启后可以恢复。
 
+**本单元实现：**
+
+- 通过真实临时目录验证创建、修改、删除和移动后，文件元数据、canonical 文档和 FTS
+  最终保持一致。
+- 通过临时扩展名写入后重命名到最终文件的测试覆盖编辑器原子保存；临时路径不会成为
+  正文记录。
+- 通过重复事件归并和记录数量断言确认同一文件不会产生重复 canonical 或 FTS 行；损坏
+  正文和事务失败的旧状态保护作为回归场景保留。
+- 通过重新打开数据库、重新创建事件归并器和监听目录配置读写测试，确认关闭后的变化
+  可以在恢复流程中继续处理。
+- 决策记录：`docs/decisions/0024-m4-acceptance.md`；验收记录：
+  `docs/acceptance/0020-m4-acceptance.md`。
+
 ## 9. M5–M8 后续执行单元
 
-这些阶段只有在 M4 稳定并且有真实使用需求时才启动。
+M5.0–M5.4 已完成工程基线；M6–M8 仍需等待真实使用需求和新的产品决策。
 
 ### M5 — Semantic Search
 
 **所属大板块：** B6 Semantic Search
 
-最小顺序：
+**状态：本地工程基线完成，预训练模型未选定。**
 
-1. 固定 embedding 模型和数据范围。
-2. 明确本地模型、用户自带 API 或云端 API 的隐私边界。
-3. 建立向量存储和版本标记。
-4. 实现 lexical + vector fusion。
-5. 使用 M3 的评估集比较结果。
-6. 只有实验证明必要时才加入 reranking。
+本次执行结果：
+
+- 固定了 provider 边界、模型 ID/版本、256 维输出和“标题 + 正文”的数据范围；不读取路径、
+  文件名和时间字段，不访问网络。
+- 建立了 schema 5 的模型登记、版本化向量存储、输入指纹和文档更新/删除清理机制；模型
+  身份或维度冲突会安全失败，不静默覆盖。
+- 保留 SQLite FTS5 的 BM25 lexical 检索，增加本地向量候选并使用固定常数 60 的 RRF 融合；
+  metadata 过滤同时作用于两条路径，模型缺失、向量缺失或向量损坏时回退到 lexical。
+- 全量索引和 M4 增量监听都按有界批次刷新向量；支持取消，已提交批次保持有效，单个文档
+  解析/向量失败不拖垮其他文档。
+- 复用 M3 固定评估集：BM25 与 hybrid 的 Recall@3 均为 `0.9722`，Top-1 均为 `9/9`；
+  当前 hybrid 有额外计算开销，因此没有加入 reranking。
+
+当前基线不是预训练语言模型，不应把它描述为已经具备通用同义理解。下一阶段如要采用
+真正的本地模型，必须先决定模型文件来源、许可、体积、运行时、设备资源、升级策略和真实
+脱敏语料评估方式。
 
 不允许用语义搜索替换确定性全文搜索。
 
@@ -872,7 +1112,7 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 工程复杂度增长速度超过操作者的理解速度。
 - M1 文件系统边界处理不足。
 - M3 没有客观搜索质量评估。
-- 过早引入 Tantivy、Embedding 或 Agent。
+- 过早引入 Tantivy、预训练模型或 Agent。
 - 未来结构被空 crate、空接口和通用抽象占满。
 - 只验证“能运行”，没有验证索引一致性和失败恢复。
 
@@ -881,11 +1121,13 @@ Codex 每次只接收一个最小交付单元。操作者负责确认边界、�
 - 不能解释当前模块职责和数据流。
 - 测试只是为了让 CI 变绿，没有覆盖实际风险。
 - 为解决一个局部问题引入大型框架。
-- M3 搜索质量没有改善，却继续扩展到 M5。
+- M5 质量没有改善，却继续扩展到 M6。
 - 产品没有真实使用者或真实语料。
 - Codex 连续修改多个边界模块而没有中间 review。
 
 ## 15. 当前下一步
 
-M0.0–M0.7、M1.0、M1.1、M1.2、M1.3、M1.4、M1.5 和 M2.0 已完成。下一步只实现
-`M2.1：纯文本、Markdown 和代码解析`：在现有 Document 边界上增加 UTF-8/BOM 处理、文件大小限制和可重现的解析失败结果；不提前实现全文搜索、语义搜索、云端同步或 Agent 系统。
+M0.0–M0.7、M1.0、M1.1、M1.2、M1.3、M1.4、M1.5、M2.0、M2.1、M2.2、M2.3a、M2.3b、
+M2.3c、M2.4、M3.0、M3.1、M3.2、M3.3、M3.4、M3.5、M3.6、M4.0、M4.1、M4.2、M4.3、M4.4
+以及 M5.0–M5.4 的本地向量混合检索基线已完成。预训练模型选择、M6 问答、云端同步、多用户、
+认证和 Agent 系统尚未开始。

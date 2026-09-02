@@ -32,12 +32,12 @@ describe("App", () => {
     mockedListen.mockResolvedValue(() => {});
   });
 
-  it("渲染工程基础状态界面并显示就绪状态", async () => {
+  it("渲染全文搜索界面并显示就绪状态", async () => {
     render(<App />);
 
     expect(
       screen.getByRole("heading", {
-        name: /个人数据，\s*留在身边。/,
+        name: /把想起的词，\s*找回来。/,
       }),
     ).toBeInTheDocument();
     expect(
@@ -118,10 +118,11 @@ describe("App", () => {
     });
 
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
 
     const input = screen.getByRole("textbox", { name: /扫描目录/ });
     fireEvent.change(input, { target: { value: "C:\\Nexus\\资料" } });
-    fireEvent.click(screen.getByRole("button", { name: "开始重扫" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
 
     await waitFor(() => {
       expect(screen.getByText("扫描中")).toBeInTheDocument();
@@ -131,6 +132,7 @@ describe("App", () => {
         rootPath: "C:\\Nexus\\资料",
         ignoredPaths: [],
         followSymlinks: false,
+        indexContent: true,
       },
     });
 
@@ -156,6 +158,9 @@ describe("App", () => {
           filesSucceeded: 999,
           filesFailed: 0,
           pathsSkipped: 0,
+          documentsSucceeded: 0,
+          documentsFailed: 0,
+          documentsSkipped: 0,
         },
       });
     });
@@ -169,6 +174,9 @@ describe("App", () => {
           filesSucceeded: 4,
           filesFailed: 0,
           pathsSkipped: 1,
+          documentsSucceeded: 3,
+          documentsFailed: 0,
+          documentsSkipped: 1,
         },
       });
     });
@@ -182,10 +190,12 @@ describe("App", () => {
           status: "completed",
           message: "手动重扫完成。",
           summary: {
-            processed: 5,
             filesSucceeded: 4,
             filesFailed: 0,
             pathsSkipped: 1,
+            documentsSucceeded: 3,
+            documentsFailed: 0,
+            documentsSkipped: 1,
             recordsRemoved: 2,
             batchesCommitted: 1,
           },
@@ -226,10 +236,11 @@ describe("App", () => {
     });
 
     render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
     fireEvent.change(screen.getByRole("textbox", { name: /扫描目录/ }), {
       target: { value: "C:\\Nexus\\资料" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始重扫" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
 
     await waitFor(() => {
       expect(screen.getByText("扫描中")).toBeInTheDocument();
@@ -242,5 +253,86 @@ describe("App", () => {
       });
     });
     expect(screen.getByText("取消中")).toBeInTheDocument();
+  });
+
+  it("显示后台自动同步状态与最近一次增量结果", async () => {
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === "get_startup_status") {
+        return {
+          phase: "ready",
+          message: "本地核心已就绪。",
+        };
+      }
+      if (command === "get_rescan_status") {
+        return {
+          state: "idle",
+          scanId: null,
+          progress: null,
+        };
+      }
+      if (command === "get_watch_status") {
+        return {
+          state: "idle",
+          watchId: null,
+        };
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("自动同步 · 未开启", { exact: true }),
+      ).toBeInTheDocument();
+    });
+
+    const watchStatusCall = mockedListen.mock.calls.find(
+      ([eventName]) => eventName === "watch-status",
+    );
+    const incrementalFinishedCall = mockedListen.mock.calls.find(
+      ([eventName]) => eventName === "incremental-finished",
+    );
+    const watchStatusListener = watchStatusCall?.[1] as
+      ((event: { payload: unknown }) => void) | undefined;
+    const incrementalFinishedListener = incrementalFinishedCall?.[1] as
+      ((event: { payload: unknown }) => void) | undefined;
+
+    expect(watchStatusListener).toBeDefined();
+    expect(incrementalFinishedListener).toBeDefined();
+
+    await act(async () => {
+      watchStatusListener?.({
+        payload: {
+          watchId: 21,
+          state: "watching",
+          message: "文件变化会在本地自动同步。",
+          errorKind: null,
+        },
+      });
+      incrementalFinishedListener?.({
+        payload: {
+          watchId: 21,
+          changesReceived: 3,
+          filesUpdated: 2,
+          filesRemoved: 1,
+          filesFailed: 0,
+          documentsUpdated: 2,
+          documentsRemoved: 1,
+          retries: 0,
+          fullRescan: false,
+        },
+      });
+    });
+
+    expect(
+      screen.getByText("自动同步 · 已开启", { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("最近一次自动同步：更新 2 项，移除 1 项，失败 0 项。", {
+        exact: true,
+      }),
+    ).toBeInTheDocument();
   });
 });
