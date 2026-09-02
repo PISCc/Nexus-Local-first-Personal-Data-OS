@@ -17,8 +17,9 @@ snippet 和桌面搜索页。但此前 M1 的真实目录重扫只写入 `file_m
 
 `nexus-core::index_directory` 和 `index_directory_with_control` 复用已有流式扫描器、
 `FileMetadataRescan`、取消控制和进度回调。每个普通文件先进入元数据重扫，再按扩展名调用
-`parse_file`；成功的 `Document` 转成 `DocumentRecord`，在同一 SQLite 连接上写入
-`documents`。现有 FTS trigger 负责同步 `documents_fts`。
+`parse_file`；成功的 `Document` 转成 `DocumentRecord`，在同一 SQLite 连接上按有界批次
+暂存。每个正文批次都把元数据、`documents` 和现有 FTS trigger 更新放在同一事务中提交；
+取消或失败只会丢弃尚未提交的批次，不会留下半个文件索引。
 
 `rescan_directory` / `rescan_directory_with_control` 不改变行为，仍然只处理文件元数据。
 Tauri 的 `start_rescan` 请求增加默认值为 `false` 的 `indexContent`；桌面文件索引页明确
@@ -40,9 +41,9 @@ Tauri 的 `start_rescan` 请求增加默认值为 `false` 的 `indexContent`；�
 ### 3. 逐文件分类失败，不让环境异常终止全局扫描
 
 不支持的扩展名计入 `documents_skipped`；损坏、权限、编码或资源超限等单文件解析错误
-计入 `documents_failed`，并继续扫描后续文件。`upsert_document` 或 SQLite 连接/事务
-失败表示持久化边界不可用，升级为任务级错误。单文档写入及其 FTS trigger 由 SQLite
-单条写操作保持原子一致。
+计入 `documents_failed`，并继续扫描后续文件。暂存正文或 SQLite 连接/事务失败表示
+持久化边界不可用，升级为任务级错误；成功收尾时单批次元数据、正文及其 FTS trigger
+更新由 SQLite 事务保持一致。
 
 ### 4. 使用不暴露路径的确定性文件文档 ID
 
@@ -53,9 +54,9 @@ Tauri 的 `start_rescan` 请求增加默认值为 `false` 的 `indexContent`；�
 
 ### 5. 取消的语义
 
-取消会在下一个扫描结果边界停止后续处理；已经提交的单文件正文记录可以保留，且每条记录
-与其 FTS 状态保持一致。`FileMetadataRescan` 尚未 `finish` 的元数据暂存不会应用到最终
-元数据表。UI 明确展示这一部分边界，不声称取消会回滚所有已完成正文写入。
+取消会在下一个扫描结果边界停止后续处理；已经提交的完整批次可以保留，尚未达到批次上限
+的元数据和正文不会应用到最终表。UI 可以明确展示本次任务已取消；保留下来的部分仍保持
+元数据、正文和 FTS 一致，不产生孤立正文。
 
 ## 未采用的方案
 
@@ -71,7 +72,7 @@ Tauri 的 `start_rescan` 请求增加默认值为 `false` 的 `indexContent`；�
 - 首次索引会读取已支持文件正文，界面必须明确这是本地行为；不上传内容、不记录正文、
   文件名或搜索词。
 - 默认上限是初始索引的产品策略，后续若需要用户可配置，应单独设计设置和迁移边界。
-- 取消可能留下部分已建立的正文索引；它是可搜索且 canonical/FTS 一致的部分状态，M4
-  需要补齐重新索引和陈旧清理策略。
+- 正文批次会把有界数量的内容暂存在会话内存中；每批提交后释放，取消只丢弃未提交批次。
+- M4 的增量路径继续使用独立的单批次事务，并负责运行期间的变更维护。
 - FNV-1a 只用于当前路径身份稳定性，不是安全哈希；若未来需要跨设备身份或抗碰撞保证，
   必须通过新 ADR 重新定义 ID 模型。

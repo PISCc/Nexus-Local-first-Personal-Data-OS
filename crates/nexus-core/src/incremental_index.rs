@@ -617,15 +617,14 @@ fn sleep_with_cancel(
         };
     }
 
-    let deadline = Instant::now()
-        .checked_add(duration)
-        .unwrap_or_else(Instant::now);
-    while Instant::now() < deadline {
+    let started_at = Instant::now();
+    let mut remaining = duration;
+    while !remaining.is_zero() {
         if control.is_cancelled() {
             return Err(IncrementalIndexError::Cancelled);
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
         thread::sleep(remaining.min(Duration::from_millis(20)));
+        remaining = duration.saturating_sub(started_at.elapsed());
     }
     Ok(())
 }

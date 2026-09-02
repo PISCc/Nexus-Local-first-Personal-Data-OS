@@ -10,6 +10,7 @@ mod embedding;
 mod search;
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
     path::{Path, PathBuf},
@@ -85,6 +86,24 @@ ON CONFLICT(path_key) DO UPDATE SET
     created_at = excluded.created_at,
     accessed_at = excluded.accessed_at,
     file_type = excluded.file_type";
+const DOCUMENT_UPSERT_SQL: &str = "INSERT INTO documents (
+    document_id,
+    source_kind,
+    source_path_key,
+    source_path_display,
+    title,
+    body,
+    line_start,
+    line_end
+) VALUES (?1, 'local_file', ?2, ?3, ?4, ?5, ?6, ?7)
+ON CONFLICT(document_id) DO UPDATE SET
+    source_kind = excluded.source_kind,
+    source_path_key = excluded.source_path_key,
+    source_path_display = excluded.source_path_display,
+    title = excluded.title,
+    body = excluded.body,
+    line_start = excluded.line_start,
+    line_end = excluded.line_end";
 
 /// 当前数据库 schema 版本。
 pub const CURRENT_SCHEMA_VERSION: u32 = 5;
@@ -398,6 +417,8 @@ pub fn begin_file_metadata_rescan<'connection>(
         root_key: scope_path_key(&root),
         batch_size,
         pending: Vec::with_capacity(batch_size.min(1024)),
+        pending_documents: BTreeMap::new(),
+        document_mode: false,
         files_succeeded: 0,
         files_failed: 0,
         paths_skipped: 0,
@@ -411,6 +432,8 @@ pub struct FileMetadataRescan<'connection> {
     root_key: Vec<u8>,
     batch_size: usize,
     pending: Vec<(FileMetadata, PreparedFileMetadata)>,
+    pending_documents: BTreeMap<String, (DocumentRecord, PreparedDocument)>,
+    document_mode: bool,
     files_succeeded: usize,
     files_failed: usize,
     paths_skipped: usize,
@@ -437,11 +460,19 @@ impl FileMetadataRescan<'_> {
         self.pending.push((metadata, prepared));
         self.files_succeeded += 1;
 
-        if self.pending.len() == self.batch_size {
+        if !self.document_mode && self.pending.len() == self.batch_size {
             self.flush_pending()?;
         }
 
         Ok(())
+    }
+
+    /// 将当前会话切换为正文索引模式。
+    ///
+    /// 正文索引模式会把每个有界批次的元数据、canonical 正文和 FTS 更新放在
+    /// 同一个 SQLite 事务中提交；metadata-only 调用方继续使用原有的最终收尾语义。
+    pub fn enable_document_mode(&mut self) {
+        self.document_mode = true;
     }
 
     /// 记录一个扫描失败路径，并保护该路径及其子路径不被本次重扫删除。
@@ -458,18 +489,39 @@ impl FileMetadataRescan<'_> {
         Ok(())
     }
 
-    /// 在当前重扫连接上原子写入一条正文文档。
+    /// 在当前正文索引批次中暂存一条正文文档。
     ///
     /// M3.6 的初始索引复用文件元数据重扫会话，因此不需要打开第二个 SQLite
-    /// 连接。文档和其 FTS trigger 更新由同一条数据库写操作保证一致；元数据
-    /// 的批次提交和最终清理仍由本会话的 `finish` 负责。
+    /// 连接。启用正文索引模式后，文档不会被单独提交；调用方应在处理完当前扫描项
+    /// 后调用 [`FileMetadataRescan::flush_document_batch_if_ready`]，让它和同批元数据
+    /// 一起应用到 canonical 表和 FTS。未启用正文索引模式时保留单条文档写入兼容性。
     pub fn upsert_document(&mut self, document: &DocumentRecord) -> Result<(), DocumentStoreError> {
-        upsert_document(self.connection, document)
+        let prepared = prepare_document(document)?;
+        if self.document_mode {
+            self.pending_documents
+                .insert(document.id.clone(), (document.clone(), prepared));
+        } else {
+            execute_document_upsert(self.connection, document, &prepared).map_err(|source| {
+                DocumentStoreError::Query {
+                    operation: "upsert",
+                    source,
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// 如果正文索引批次已达到上限，则原子提交当前批次。
+    pub fn flush_document_batch_if_ready(&mut self) -> Result<(), FileMetadataError> {
+        if self.document_mode && self.pending.len() >= self.batch_size {
+            self.flush_pending_with_documents()?;
+        }
+        Ok(())
     }
 
     /// 提交剩余批次、删除本次重扫确认不存在的旧记录，并清理临时表。
     pub fn finish(mut self) -> Result<FileMetadataRescanSummary, FileMetadataError> {
-        let result = self.finish_inner();
+        let result = self.finish_inner(false);
         let cleanup_result = self.cleanup_temp_tables();
 
         match (result, cleanup_result) {
@@ -479,9 +531,31 @@ impl FileMetadataRescan<'_> {
         }
     }
 
-    fn finish_inner(&mut self) -> Result<FileMetadataRescanSummary, FileMetadataError> {
-        self.flush_pending()?;
-        let records_removed = self.apply_staged_records_and_delete_stale()?;
+    /// 提交元数据和本次重扫暂存的正文，并清理已确认删除文件的旧正文。
+    ///
+    /// 这是初始正文索引使用的收尾入口；与 metadata-only 的 [`finish`](Self::finish)
+    /// 分开，避免改变 M1 调用方的行为。
+    pub fn finish_with_documents(mut self) -> Result<FileMetadataRescanSummary, FileMetadataError> {
+        let result = self.finish_inner(true);
+        let cleanup_result = self.cleanup_temp_tables();
+
+        match (result, cleanup_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(summary), Ok(())) => Ok(summary),
+        }
+    }
+
+    fn finish_inner(
+        &mut self,
+        include_documents: bool,
+    ) -> Result<FileMetadataRescanSummary, FileMetadataError> {
+        if include_documents {
+            self.flush_pending_with_documents()?;
+        } else {
+            self.flush_pending()?;
+        }
+        let records_removed = self.apply_staged_records_and_delete_stale(include_documents)?;
 
         Ok(FileMetadataRescanSummary {
             files_succeeded: self.files_succeeded,
@@ -567,7 +641,66 @@ impl FileMetadataRescan<'_> {
         Ok(())
     }
 
-    fn apply_staged_records_and_delete_stale(&mut self) -> Result<usize, FileMetadataError> {
+    fn flush_pending_with_documents(&mut self) -> Result<(), FileMetadataError> {
+        if self.pending.is_empty() {
+            self.pending_documents.clear();
+            return Ok(());
+        }
+
+        let transaction =
+            self.connection
+                .transaction()
+                .map_err(|source| FileMetadataError::Query {
+                    operation: "rescan_batch_begin",
+                    source,
+                })?;
+
+        for (metadata, prepared) in &self.pending {
+            execute_file_metadata_upsert(&transaction, metadata, prepared)?;
+
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO temp.nexus_scan_seen (path_key) VALUES (?1)",
+                    params![&prepared.path_key],
+                )
+                .map_err(|source| FileMetadataError::Query {
+                    operation: "rescan_seen",
+                    source,
+                })?;
+        }
+
+        for (document, prepared) in self.pending_documents.values() {
+            if self
+                .pending
+                .iter()
+                .any(|(_, metadata)| metadata.path_key == prepared.path_key)
+            {
+                execute_document_upsert(&transaction, document, prepared).map_err(|source| {
+                    FileMetadataError::Query {
+                        operation: "rescan_document_apply",
+                        source,
+                    }
+                })?;
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|source| FileMetadataError::Query {
+                operation: "rescan_batch_commit",
+                source,
+            })?;
+
+        self.pending.clear();
+        self.pending_documents.clear();
+        self.batches_committed += 1;
+        Ok(())
+    }
+
+    fn apply_staged_records_and_delete_stale(
+        &mut self,
+        include_documents: bool,
+    ) -> Result<usize, FileMetadataError> {
         let transaction =
             self.connection
                 .transaction()
@@ -589,6 +722,15 @@ impl FileMetadataRescan<'_> {
                 operation: "rescan_remove",
                 source,
             })?;
+
+        if include_documents {
+            transaction
+                .execute(delete_stale_documents_sql(), params![&self.root_key])
+                .map_err(|source| FileMetadataError::Query {
+                    operation: "rescan_document_remove",
+                    source,
+                })?;
+        }
 
         transaction
             .commit()
@@ -917,40 +1059,33 @@ pub fn upsert_document(
 ) -> Result<(), DocumentStoreError> {
     let prepared = prepare_document(document)?;
 
-    connection
-        .execute(
-            "INSERT INTO documents (
-                 document_id,
-                 source_kind,
-                 source_path_key,
-                 source_path_display,
-                 title,
-                 body,
-                 line_start,
-                 line_end
-             ) VALUES (?1, 'local_file', ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(document_id) DO UPDATE SET
-                 source_kind = excluded.source_kind,
-                 source_path_key = excluded.source_path_key,
-                 source_path_display = excluded.source_path_display,
-                 title = excluded.title,
-                 body = excluded.body,
-                 line_start = excluded.line_start,
-                 line_end = excluded.line_end",
-            params![
-                &document.id,
-                &prepared.path_key,
-                &prepared.path_display,
-                &document.title,
-                &document.body,
-                prepared.line_start,
-                prepared.line_end,
-            ],
-        )
-        .map_err(|source| DocumentStoreError::Query {
+    execute_document_upsert(connection, document, &prepared).map_err(|source| {
+        DocumentStoreError::Query {
             operation: "upsert",
             source,
-        })?;
+        }
+    })?;
+
+    Ok(())
+}
+
+fn execute_document_upsert(
+    connection: &Connection,
+    document: &DocumentRecord,
+    prepared: &PreparedDocument,
+) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        DOCUMENT_UPSERT_SQL,
+        params![
+            &document.id,
+            &prepared.path_key,
+            &prepared.path_display,
+            &document.title,
+            &document.body,
+            prepared.line_start,
+            prepared.line_end,
+        ],
+    )?;
 
     Ok(())
 }
@@ -1417,6 +1552,130 @@ fn delete_stale_records_sql() -> &'static str {
                 ) = protected.path_key
                 AND substr(
                     file_metadata.path_key,
+                    length(protected.path_key) + 1,
+                    1
+                ) = X'2F'
+            )
+     )"
+}
+
+#[cfg(unix)]
+fn delete_stale_documents_sql() -> &'static str {
+    "DELETE FROM documents
+     WHERE (
+         length(?1) = 0
+         OR documents.source_path_key = ?1
+         OR (
+             length(documents.source_path_key) > length(?1)
+             AND substr(documents.source_path_key, 1, length(?1)) = ?1
+             AND substr(documents.source_path_key, length(?1) + 1, 1) = X'2F'
+         )
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM file_metadata
+         WHERE file_metadata.path_key = documents.source_path_key
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM temp.nexus_scan_protected AS protected
+         WHERE length(protected.path_key) = 0
+            OR protected.path_key = documents.source_path_key
+            OR (
+                length(documents.source_path_key) > length(protected.path_key)
+                AND substr(
+                    documents.source_path_key,
+                    1,
+                    length(protected.path_key)
+                ) = protected.path_key
+                AND substr(
+                    documents.source_path_key,
+                    length(protected.path_key) + 1,
+                    1
+                ) = X'2F'
+            )
+     )"
+}
+
+#[cfg(windows)]
+fn delete_stale_documents_sql() -> &'static str {
+    "DELETE FROM documents
+     WHERE (
+         length(?1) = 0
+         OR documents.source_path_key = ?1
+         OR (
+             length(documents.source_path_key) > length(?1)
+             AND substr(documents.source_path_key, 1, length(?1)) = ?1
+             AND (
+                 substr(documents.source_path_key, length(?1) + 1, 2) = X'5C00'
+                 OR substr(documents.source_path_key, length(?1) + 1, 2) = X'2F00'
+             )
+         )
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM file_metadata
+         WHERE file_metadata.path_key = documents.source_path_key
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM temp.nexus_scan_protected AS protected
+         WHERE length(protected.path_key) = 0
+            OR protected.path_key = documents.source_path_key
+            OR (
+                length(documents.source_path_key) > length(protected.path_key)
+                AND substr(
+                    documents.source_path_key,
+                    1,
+                    length(protected.path_key)
+                ) = protected.path_key
+                AND (
+                    substr(
+                        documents.source_path_key,
+                        length(protected.path_key) + 1,
+                        2
+                    ) = X'5C00'
+                    OR substr(
+                        documents.source_path_key,
+                        length(protected.path_key) + 1,
+                        2
+                    ) = X'2F00'
+                )
+            )
+     )"
+}
+
+#[cfg(not(any(unix, windows)))]
+fn delete_stale_documents_sql() -> &'static str {
+    "DELETE FROM documents
+     WHERE (
+         length(?1) = 0
+         OR documents.source_path_key = ?1
+         OR (
+             length(documents.source_path_key) > length(?1)
+             AND substr(documents.source_path_key, 1, length(?1)) = ?1
+             AND substr(documents.source_path_key, length(?1) + 1, 1) = X'2F'
+         )
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM file_metadata
+         WHERE file_metadata.path_key = documents.source_path_key
+     )
+     AND NOT EXISTS (
+         SELECT 1
+         FROM temp.nexus_scan_protected AS protected
+         WHERE length(protected.path_key) = 0
+            OR protected.path_key = documents.source_path_key
+            OR (
+                length(documents.source_path_key) > length(protected.path_key)
+                AND substr(
+                    documents.source_path_key,
+                    1,
+                    length(protected.path_key)
+                ) = protected.path_key
+                AND substr(
+                    documents.source_path_key,
                     length(protected.path_key) + 1,
                     1
                 ) = X'2F'
@@ -2475,6 +2734,43 @@ mod tests {
             .is_some());
         assert!(get_file_metadata(&connection, &staged.path)
             .expect("读取取消测试暂存记录失败")
+            .is_none());
+    }
+
+    #[test]
+    fn dropping_content_rescan_session_does_not_apply_staged_documents() {
+        let temporary_directory = TemporaryDirectory::new();
+        let database_path = temporary_directory.database_path();
+        let mut connection =
+            initialize_database(&database_path).expect("初始化正文取消测试数据库失败");
+        let root = temporary_directory.path.clone();
+        let metadata = synthetic_metadata(&root, 2);
+        let document = DocumentRecord {
+            id: "file:staged-content".to_owned(),
+            source_path: metadata.path.clone(),
+            title: "staged-content".to_owned(),
+            body: "staged body".to_owned(),
+            line_start: None,
+            line_end: None,
+        };
+
+        {
+            let mut session = begin_file_metadata_rescan(&mut connection, &root, 2)
+                .expect("创建正文取消测试重扫会话失败");
+            session.enable_document_mode();
+            session
+                .record_file(metadata.clone())
+                .expect("暂存正文取消测试元数据失败");
+            session
+                .upsert_document(&document)
+                .expect("暂存正文取消测试文档失败");
+        }
+
+        assert!(get_file_metadata(&connection, &metadata.path)
+            .expect("读取正文取消测试元数据失败")
+            .is_none());
+        assert!(get_document(&connection, &document.id)
+            .expect("读取正文取消测试文档失败")
             .is_none());
     }
 

@@ -904,6 +904,10 @@ struct QueryToken {
 }
 
 fn parse_search_query(query: &str) -> Result<ParsedSearchQuery, SearchError> {
+    if query.contains('\0') {
+        return Err(SearchError::InvalidQuerySyntax);
+    }
+
     if query.trim().is_empty() {
         return Err(SearchError::EmptyQuery);
     }
@@ -1407,6 +1411,10 @@ mod tests {
             Err(SearchError::InvalidDate)
         ));
         assert!(matches!(
+            parse_search_query("filename:secret\0"),
+            Err(SearchError::InvalidQuerySyntax)
+        ));
+        assert!(matches!(
             parse_search_query("AND"),
             Err(SearchError::InvalidQuerySyntax)
         ));
@@ -1686,6 +1694,54 @@ mod tests {
         let results =
             search_documents_hybrid(&connection, "fallback", &[], "missing-model", "1", 10)
                 .expect("缺失模型时 lexical fallback 失败");
+        assert_eq!(
+            result_ids(
+                &results
+                    .iter()
+                    .map(|item| item.result.clone())
+                    .collect::<Vec<_>>()
+            ),
+            vec![document.id.as_str()]
+        );
+        assert!(results.iter().all(|result| result.semantic_rank.is_none()));
+    }
+
+    #[test]
+    fn skips_corrupt_stored_vectors_and_keeps_lexical_results() {
+        let temporary_directory = TemporaryDirectory::new();
+        let mut connection = crate::initialize_database(temporary_directory.database_path())
+            .expect("初始化损坏向量回退测试数据库失败");
+        let document = test_document(
+            "file:corrupt-vector",
+            temporary_directory.child_path("corrupt-vector.md"),
+            "Corrupt vector",
+            "corrupt vector term",
+        );
+        upsert_document(&connection, &document).expect("写入损坏向量测试文档失败");
+        let model = test_embedding_model();
+        upsert_document_embeddings(
+            &mut connection,
+            &model,
+            &[test_embedding(&document.id, [1.0, 0.0, 0.0, 0.0])],
+        )
+        .expect("写入损坏向量测试 embedding 失败");
+        connection
+            .execute(
+                "UPDATE document_embeddings SET vector = ?1 WHERE document_id = ?2",
+                rusqlite::params![vec![0_u8; 16], &document.id],
+            )
+            .expect("写入损坏向量测试数据失败");
+
+        let results = search_documents_hybrid(
+            &connection,
+            "corrupt",
+            &[1.0, 0.0, 0.0, 0.0],
+            &model.model_id,
+            &model.model_version,
+            10,
+        )
+        .expect("损坏向量 lexical fallback 失败");
+
         assert_eq!(
             result_ids(
                 &results

@@ -124,6 +124,9 @@ where
     validate_options(options)?;
     let mut connection = initialize_database(database_path)
         .map_err(|source| EmbeddingIndexError::Database { source })?;
+    if control.is_cancelled() {
+        return Err(EmbeddingIndexError::Cancelled);
+    }
     let model = model_from_provider(provider);
     upsert_document_embeddings(&mut connection, &model, &[])
         .map_err(|source| EmbeddingIndexError::EmbeddingStore { source })?;
@@ -195,20 +198,27 @@ where
     }
 
     let documents = documents_by_id.into_values().collect::<Vec<_>>();
-    let (batch, documents_failed) = prepare_embeddings(&documents, provider, control)?;
-    let embeddings_written = if batch.is_empty() {
-        0
-    } else {
-        upsert_document_embeddings(&mut connection, &model, &batch)
-            .map_err(|source| EmbeddingIndexError::EmbeddingStore { source })?
-            .embeddings_written
-    };
+    let mut documents_failed = 0;
+    let mut embeddings_written = 0;
+    let mut batches = 0;
+
+    for document_batch in documents.chunks(options.batch_size) {
+        let (batch, failed) = prepare_embeddings(document_batch, provider, control)?;
+        documents_failed += failed;
+
+        if !batch.is_empty() {
+            let write_summary = upsert_document_embeddings(&mut connection, &model, &batch)
+                .map_err(|source| EmbeddingIndexError::EmbeddingStore { source })?;
+            embeddings_written += write_summary.embeddings_written;
+            batches += 1;
+        }
+    }
 
     Ok(EmbeddingIndexSummary {
         documents_seen: documents.len(),
         embeddings_written,
         documents_failed,
-        batches: usize::from(!batch.is_empty()),
+        batches,
     })
 }
 
@@ -410,6 +420,57 @@ mod tests {
     }
 
     #[test]
+    fn refreshes_all_documents_for_a_path_in_bounded_batches() {
+        let directory = TemporaryDirectory::new();
+        let database_path = directory.database_path();
+        let shared_path = directory.path.join("split.md");
+        let connection = initialize_database(&database_path).expect("初始化多文档刷新数据库失败");
+
+        for (id, body) in [
+            ("file:split-a", "first body"),
+            ("file:split-b", "second body"),
+            ("file:split-c", "third body"),
+        ] {
+            upsert_document(
+                &connection,
+                &DocumentRecord {
+                    id: id.to_owned(),
+                    source_path: shared_path.clone(),
+                    title: id.to_owned(),
+                    body: body.to_owned(),
+                    line_start: None,
+                    line_end: None,
+                },
+            )
+            .expect("写入同来源多文档失败");
+        }
+        drop(connection);
+
+        let summary = refresh_document_embeddings_for_paths(
+            &database_path,
+            std::slice::from_ref(&shared_path),
+            &LocalFeatureEmbedding::new(),
+            EmbeddingIndexOptions { batch_size: 2 },
+            &RescanControl::new(),
+        )
+        .expect("分批刷新同来源多文档失败");
+
+        assert_eq!(summary.documents_seen, 3);
+        assert_eq!(summary.embeddings_written, 3);
+        assert_eq!(summary.documents_failed, 0);
+        assert_eq!(summary.batches, 2);
+
+        let connection = initialize_database(&database_path).expect("重新打开多文档刷新数据库失败");
+        for id in ["file:split-a", "file:split-b", "file:split-c"] {
+            assert!(
+                get_document_embedding(&connection, id, "nexus-local-feature-hash", "1",)
+                    .expect("读取同来源多文档 embedding 失败")
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
     fn cancellation_stops_before_writing_document_batches() {
         let directory = TemporaryDirectory::new();
         let database_path = directory.database_path();
@@ -432,6 +493,12 @@ mod tests {
             Err(super::EmbeddingIndexError::Cancelled)
         ));
         let connection = initialize_database(&database_path).expect("重新打开取消测试数据库失败");
+        let model_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM embedding_models", [], |row| {
+                row.get(0)
+            })
+            .expect("统计取消测试模型失败");
+        assert_eq!(model_count, 0);
         assert!(get_document_embedding(
             &connection,
             "file:cancel",

@@ -263,6 +263,9 @@ where
     let mut connection = initialize_database(database_path).map_err(RescanError::Database)?;
     let mut persistence = begin_file_metadata_rescan(&mut connection, &root, batch_size)
         .map_err(RescanError::Persistence)?;
+    if index_content {
+        persistence.enable_document_mode();
+    }
     let mut progress = RescanProgress::default();
 
     for item in scanner {
@@ -314,6 +317,10 @@ where
                 .map(|()| progress.files_failed += 1)?,
         }
 
+        persistence
+            .flush_document_batch_if_ready()
+            .map_err(RescanError::Persistence)?;
+
         progress.processed += 1;
         on_progress(progress);
     }
@@ -322,8 +329,13 @@ where
         return Err(RescanError::Cancelled);
     }
 
-    persistence
-        .finish()
+    let finish_result = if index_content {
+        persistence.finish_with_documents()
+    } else {
+        persistence.finish()
+    };
+
+    finish_result
         .map(|summary| RescanSummary {
             files_succeeded: summary.files_succeeded,
             files_failed: summary.files_failed,
@@ -700,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_content_index_keeps_committed_documents_but_not_staged_metadata() {
+    fn cancelling_content_index_keeps_only_committed_complete_batches() {
         let temporary_directory = TemporaryDirectory::new();
         let database_path = temporary_directory.database_path();
         let root = temporary_directory.child_path("library");
@@ -733,13 +745,41 @@ mod tests {
         let document_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
             .expect("统计取消后的正文文档失败");
-        assert_eq!(metadata_count, 0);
+        assert_eq!(metadata_count, 1);
         assert_eq!(document_count, 1);
         assert_eq!(
             search_documents(&connection, "searchable", DEFAULT_SEARCH_LIMIT)
-                .expect("查询取消后已提交的正文失败")
+                .expect("查询取消后已提交正文失败")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn content_index_removes_documents_for_confirmed_missing_files() {
+        let temporary_directory = TemporaryDirectory::new();
+        let database_path = temporary_directory.database_path();
+        let root = temporary_directory.child_path("library");
+        let path = root.join("stale.md");
+        write_file(&path, b"stale searchable content");
+
+        index_directory(&database_path, &root, ScanOptions::default(), 2)
+            .expect("建立待删除正文索引失败");
+        fs::remove_file(&path).expect("删除待删除正文文件失败");
+
+        let summary = index_directory(&database_path, &root, ScanOptions::default(), 2)
+            .expect("清理待删除正文索引失败");
+        assert_eq!(summary.records_removed, 1);
+
+        let connection = initialize_database(&database_path).expect("打开待删除正文数据库失败");
+        let document_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .expect("统计待删除正文数量失败");
+        assert_eq!(document_count, 0);
+        assert!(
+            search_documents(&connection, "searchable", DEFAULT_SEARCH_LIMIT)
+                .expect("查询已删除正文失败")
+                .is_empty()
         );
     }
 
