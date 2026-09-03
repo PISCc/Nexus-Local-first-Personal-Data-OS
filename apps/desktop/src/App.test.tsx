@@ -45,31 +45,48 @@ describe("App", () => {
       "/nexus-product-icon.png",
     );
     expect(
-      screen.getByRole("heading", { name: "正在连接本地核心。" }),
+      screen.getByRole("heading", { name: "正在准备你的资料。" }),
     ).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText("基础界面已启动。")).toBeInTheDocument();
+      expect(document.title).toBe("Nexus — 全文搜索");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("你的资料可以搜索了。")).toBeInTheDocument();
     });
     expect(mockedInvoke).toHaveBeenCalledWith("get_startup_status");
   });
 
-  it("显示核心不可用时的降级状态", async () => {
+  it("提供跳到主要内容的键盘入口并随视图更新标题", async () => {
+    render(<App />);
+
+    expect(screen.getByRole("link", { name: "跳到主要内容" })).toHaveAttribute(
+      "href",
+      "#main-content",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
+
+    await waitFor(() => {
+      expect(document.title).toBe("Nexus — 整理资料");
+    });
+  });
+
+  it("显示资料暂时不可用时的用户提示", async () => {
     mockedInvoke.mockRejectedValueOnce(new Error("模拟核心不可用"));
 
     render(<App />);
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "本地核心暂不可用。" }),
+        screen.getByRole("heading", { name: "暂时无法读取你的资料。" }),
       ).toBeInTheDocument();
     });
-    expect(
-      screen.getByText("桌面核心暂不可用，当前处于降级模式。"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("请重新打开应用后再试。")).toBeInTheDocument();
   });
 
-  it("显示核心主动返回的降级状态", async () => {
+  it("不把内部启动信息直接展示给用户", async () => {
     mockedInvoke.mockResolvedValueOnce({
       phase: "degraded",
       message: "本地数据存储暂时不可用。",
@@ -79,10 +96,13 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "本地核心暂不可用。" }),
+        screen.getByRole("heading", { name: "暂时无法读取你的资料。" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText("本地数据存储暂时不可用。")).toBeInTheDocument();
+    expect(screen.getByText("请重新打开应用后再试。")).toBeInTheDocument();
+    expect(
+      screen.queryByText("本地数据存储暂时不可用。"),
+    ).not.toBeInTheDocument();
   });
 
   it("回填已保存的来源目录", async () => {
@@ -107,10 +127,10 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
 
     await waitFor(() => {
-      expect(screen.getByRole("textbox", { name: /扫描目录/ })).toHaveValue(
+      expect(screen.getByRole("textbox", { name: /资料文件夹/ })).toHaveValue(
         "C:\\Nexus\\资料",
       );
     });
@@ -153,15 +173,15 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "索引已就绪。" }),
+        screen.getByRole("heading", { name: "你的资料已经可以搜索。" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByText("42 个文件 / 35 篇正文")).toBeInTheDocument();
-    expect(screen.getByText("自动同步已开启")).toBeInTheDocument();
+    expect(screen.getByText("42 个文件 / 35 项可搜索内容")).toBeInTheDocument();
+    expect(screen.getByText("自动更新已开启")).toBeInTheDocument();
     expect(mockedInvoke).toHaveBeenCalledWith("get_index_health");
   });
 
@@ -172,12 +192,10 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "本地核心暂不可用。" }),
+        screen.getByRole("heading", { name: "暂时无法读取你的资料。" }),
       ).toBeInTheDocument();
     });
-    expect(
-      screen.getByText("桌面核心暂不可用，当前处于降级模式。"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("请重新打开应用后再试。")).toBeInTheDocument();
   });
 
   it("启动重扫并只接收当前任务的进度与完成事件", async () => {
@@ -202,14 +220,16 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
 
-    const input = screen.getByRole("textbox", { name: /扫描目录/ });
+    const input = screen.getByRole("textbox", { name: /资料文件夹/ });
     fireEvent.change(input, { target: { value: "C:\\Nexus\\资料" } });
-    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始整理" }));
 
     await waitFor(() => {
-      expect(screen.getByText("扫描中")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "正在整理你的资料。" }),
+      ).toBeInTheDocument();
     });
     expect(mockedInvoke).toHaveBeenCalledWith("start_rescan", {
       request: {
@@ -265,7 +285,7 @@ describe("App", () => {
       });
     });
     expect(screen.getByText("5 项已处理")).toBeInTheDocument();
-    expect(screen.getByText("成功")).toBeInTheDocument();
+    expect(screen.getByText("已整理文件")).toBeInTheDocument();
 
     await act(async () => {
       finishedListener?.({
@@ -289,9 +309,9 @@ describe("App", () => {
     });
 
     expect(
-      screen.getByText("手动重扫完成。", { exact: true }),
+      screen.getByText("这次资料整理已完成。", { exact: true }),
     ).toBeInTheDocument();
-    expect(screen.getByText("移除旧记录")).toBeInTheDocument();
+    expect(screen.getByText("已移除旧内容")).toBeInTheDocument();
     expect(screen.getByText("2", { selector: "strong" })).toBeInTheDocument();
   });
 
@@ -320,23 +340,25 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
-    fireEvent.change(screen.getByRole("textbox", { name: /扫描目录/ }), {
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: /资料文件夹/ }), {
       target: { value: "C:\\Nexus\\资料" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始整理" }));
 
     await waitFor(() => {
-      expect(screen.getByText("扫描中")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "正在整理你的资料。" }),
+      ).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止整理" }));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith("cancel_rescan", {
         request: { scanId: 12 },
       });
     });
-    expect(screen.getByText("取消中")).toBeInTheDocument();
+    expect(screen.getByText("停止中")).toBeInTheDocument();
   });
 
   it("重扫启动失败时恢复实际自动同步状态", async () => {
@@ -367,26 +389,26 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
 
     await waitFor(() => {
       expect(
-        screen.getByText("自动同步 · 已开启", { exact: true }),
+        screen.getByText("自动更新 · 已开启", { exact: true }),
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("textbox", { name: /扫描目录/ }), {
+    fireEvent.change(screen.getByRole("textbox", { name: /资料文件夹/ }), {
       target: { value: "C:\\Nexus\\资料" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始整理" }));
 
     await waitFor(() => {
       expect(
-        screen.getByText("自动同步 · 已开启", { exact: true }),
+        screen.getByText("自动更新 · 已开启", { exact: true }),
       ).toBeInTheDocument();
     });
     expect(
-      screen.queryByText("自动同步 · 需重试", { exact: true }),
+      screen.queryByText("自动更新 · 需要重试", { exact: true }),
     ).not.toBeInTheDocument();
   });
 
@@ -418,14 +440,16 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
-    fireEvent.change(screen.getByRole("textbox", { name: /扫描目录/ }), {
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: /资料文件夹/ }), {
       target: { value: "C:\\Nexus\\资料" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始索引" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始整理" }));
 
     await waitFor(() => {
-      expect(screen.getByText("扫描中")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "正在整理你的资料。" }),
+      ).toBeInTheDocument();
     });
 
     const finishedCall = mockedListen.mock.calls.find(
@@ -447,10 +471,10 @@ describe("App", () => {
     });
 
     expect(
-      screen.getByText("自动同步 · 未开启", { exact: true }),
+      screen.getByText("自动更新 · 未开启", { exact: true }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "重新索引" }),
+      screen.getByRole("button", { name: "重新整理" }),
     ).toBeInTheDocument();
   });
 
@@ -479,11 +503,11 @@ describe("App", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /文件索引/ }));
+    fireEvent.click(screen.getByRole("button", { name: /整理资料/ }));
 
     await waitFor(() => {
       expect(
-        screen.getByText("自动同步 · 未开启", { exact: true }),
+        screen.getByText("自动更新 · 未开启", { exact: true }),
       ).toBeInTheDocument();
     });
 
@@ -526,12 +550,15 @@ describe("App", () => {
     });
 
     expect(
-      screen.getByText("自动同步 · 已开启", { exact: true }),
+      screen.getByText("自动更新 · 已开启", { exact: true }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("最近一次自动同步：更新 2 项，移除 1 项，失败 0 项。", {
-        exact: true,
-      }),
+      screen.getByText(
+        "最近一次自动更新：更新 2 项，移除 1 项，需要注意 0 项。",
+        {
+          exact: true,
+        },
+      ),
     ).toBeInTheDocument();
   });
 });

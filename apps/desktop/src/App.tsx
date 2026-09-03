@@ -1,23 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import SearchView from "./SearchView";
 
 const principles = [
   {
     index: "01",
-    title: "默认本地运行",
-    description: "除非你主动选择，源数据始终保留在这台设备上。",
+    title: "资料只留在你的设备",
+    description: "文件内容不会上传到云端，除非你主动选择。",
   },
   {
     index: "02",
-    title: "先搜索，再用人工智能",
-    description: "确定性的检索能力是基础，而不是事后补上的功能。",
+    title: "先找到，再处理",
+    description: "先找到准确的原文件，再决定下一步怎么使用。",
   },
   {
     index: "03",
-    title: "来源始终可追溯",
-    description: "未来的每个回答，都应能回到它所依据的原始文档。",
+    title: "每条结果都有出处",
+    description: "从搜索结果可以直接回到原始文件，不需要凭记忆寻找。",
   },
 ];
 
@@ -138,7 +139,7 @@ type ActiveView = "search" | "index";
 
 const initialStartupStatus: StartupStatus = {
   phase: "loading",
-  message: "正在连接本地核心，请稍候。",
+  message: "正在准备你的资料，请稍候。",
 };
 
 const emptyProgress: RescanProgress = {
@@ -156,56 +157,83 @@ const statusPresentation: Record<
   { label: string; title: string; footer: string }
 > = {
   loading: {
-    label: "正在检查",
-    title: "正在连接本地核心。",
-    footer: "检查中",
+    label: "准备中",
+    title: "正在准备你的资料。",
+    footer: "请稍候",
   },
   ready: {
-    label: "本地 / 就绪",
-    title: "基础界面已启动。",
-    footer: "连接正常",
+    label: "已准备好",
+    title: "可以开始使用了。",
+    footer: "服务正常",
   },
   degraded: {
-    label: "降级 / 需处理",
-    title: "本地核心暂不可用。",
-    footer: "尚未连接",
+    label: "暂时不可用",
+    title: "暂时无法读取你的资料。",
+    footer: "请稍后重试",
   },
 };
 
 const indexHealthPresentation: Record<
   IndexHealthState,
-  { label: string; title: string }
+  { label: string; title: string; message: string }
 > = {
-  "not-configured": { label: "待配置", title: "还没有可搜索的内容。" },
-  indexing: { label: "正在索引", title: "正在更新本地索引。" },
-  ready: { label: "索引 / 就绪", title: "索引已就绪。" },
-  degraded: { label: "索引 / 需处理", title: "索引需要处理。" },
-  failed: { label: "索引 / 未完成", title: "最近一次索引未完成。" },
-  cancelled: { label: "索引 / 已取消", title: "最近一次索引已取消。" },
+  "not-configured": {
+    label: "待开始",
+    title: "还没有可搜索的资料。",
+    message: "选择一个文件夹后，Nexus 会为你建立可搜索内容。",
+  },
+  indexing: {
+    label: "整理中",
+    title: "正在整理你的资料。",
+    message: "已经完成的内容仍然可以搜索。",
+  },
+  ready: {
+    label: "已准备好",
+    title: "你的资料已经可以搜索。",
+    message: "文件发生变化后，内容会在本机自动更新。",
+  },
+  degraded: {
+    label: "需要处理",
+    title: "有些资料还没有整理完成。",
+    message: "已有内容仍可搜索；重新整理可以补齐缺少的内容。",
+  },
+  failed: {
+    label: "未完成",
+    title: "这次整理没有完成。",
+    message: "已有内容会保留，请检查文件夹后重新整理。",
+  },
+  cancelled: {
+    label: "已暂停",
+    title: "资料整理已暂停。",
+    message: "已经保存的内容会保留，可以随时重新开始。",
+  },
 };
 
 const rescanPhasePresentation: Record<
   RescanPhase,
   { label: string; title: string }
 > = {
-  idle: { label: "等待开始", title: "输入目录后开始一次本地初始索引。" },
-  starting: { label: "准备中", title: "正在准备本地索引任务。" },
-  running: { label: "扫描中", title: "正在扫描文件并建立正文索引。" },
-  cancelling: { label: "取消中", title: "正在停止本地索引。" },
-  completed: { label: "已完成", title: "本次本地索引已完成。" },
-  cancelled: { label: "已取消", title: "本次本地索引已取消。" },
-  failed: { label: "未完成", title: "本次本地索引未完成。" },
+  idle: { label: "等待开始", title: "选择一个文件夹开始整理。" },
+  starting: { label: "准备中", title: "正在准备资料整理。" },
+  running: { label: "整理中", title: "正在整理文件并准备搜索。" },
+  cancelling: { label: "停止中", title: "正在停止资料整理。" },
+  completed: { label: "已完成", title: "这次资料整理已完成。" },
+  cancelled: { label: "已暂停", title: "资料整理已暂停。" },
+  failed: { label: "未完成", title: "这次资料整理未完成。" },
 };
 
 const watchPhasePresentation: Record<
   WatchPhase,
   { label: string; message: string }
 > = {
-  idle: { label: "未开启", message: "完成一次索引后会自动同步文件变化。" },
-  starting: { label: "准备中", message: "正在准备文件自动同步。" },
-  watching: { label: "已开启", message: "文件变化会在本地自动同步。" },
-  stopped: { label: "已停止", message: "文件自动同步已停止。" },
-  failed: { label: "需重试", message: "文件自动同步暂时不可用。" },
+  idle: { label: "未开启", message: "完成首次整理后，文件变化会自动更新。" },
+  starting: { label: "正在开启", message: "正在准备文件自动更新。" },
+  watching: { label: "已开启", message: "文件变化会自动更新。" },
+  stopped: { label: "已停止", message: "文件自动更新已停止。" },
+  failed: {
+    label: "需要重试",
+    message: "文件自动更新暂时不可用，请重新整理。",
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -420,7 +448,7 @@ async function loadStartupStatus(): Promise<StartupStatus> {
 
   return {
     phase: "degraded",
-    message: "桌面核心暂不可用，当前处于降级模式。",
+    message: "暂时无法读取你的资料，请重新打开应用后再试。",
   };
 }
 
@@ -444,6 +472,20 @@ async function loadIndexHealth(): Promise<IndexHealthResponse | null> {
   }
 }
 
+function updateWindowTitle(title: string): void {
+  document.title = title;
+
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return;
+  }
+
+  void getCurrentWindow()
+    .setTitle(title)
+    .catch(() => {
+      // 浏览器预览或旧版本核心没有窗口标题命令，保留文档标题。
+    });
+}
+
 function App() {
   const [activeView, setActiveView] = useState<ActiveView>("search");
   const [startupStatus, setStartupStatus] =
@@ -456,7 +498,6 @@ function App() {
   const [rescanMessage, setRescanMessage] = useState(
     rescanPhasePresentation.idle.title,
   );
-  const [scanId, setScanId] = useState<number | null>(null);
   const [progress, setProgress] = useState<RescanProgress>(emptyProgress);
   const [summary, setSummary] = useState<RescanSummary | null>(null);
   const [watchPhase, setWatchPhase] = useState<WatchPhase>("idle");
@@ -470,6 +511,12 @@ function App() {
   const activeWatchIdRef = useRef<number | null>(null);
   const latestWatchIdRef = useRef<number | null>(null);
   const watchPhaseRef = useRef<WatchPhase>("idle");
+
+  useEffect(() => {
+    updateWindowTitle(
+      `Nexus — ${activeView === "search" ? "全文搜索" : "整理资料"}`,
+    );
+  }, [activeView]);
 
   useEffect(() => {
     let active = true;
@@ -534,7 +581,6 @@ function App() {
           return;
         }
         activeScanIdRef.current = payload.scanId;
-        setScanId(payload.scanId);
       }
 
       if (activeScanIdRef.current !== payload.scanId) {
@@ -559,7 +605,6 @@ function App() {
           return;
         }
         activeScanIdRef.current = payload.scanId;
-        setScanId(payload.scanId);
       }
 
       if (activeScanIdRef.current !== payload.scanId) {
@@ -569,7 +614,7 @@ function App() {
       activeScanIdRef.current = null;
       rescanPhaseRef.current = payload.status;
       setRescanPhase(payload.status);
-      setRescanMessage(payload.message);
+      setRescanMessage(rescanPhasePresentation[payload.status].title);
       setSummary(payload.summary);
       void refreshIndexHealth();
 
@@ -609,7 +654,7 @@ function App() {
         activeWatchIdRef.current = null;
       }
       setWatchPhase(payload.state);
-      setWatchMessage(payload.message);
+      setWatchMessage(watchPhasePresentation[payload.state].message);
       void refreshIndexHealth();
     };
 
@@ -650,7 +695,6 @@ function App() {
         }
 
         activeScanIdRef.current = response.scanId;
-        setScanId(response.scanId);
         setProgress(response.progress ?? emptyProgress);
         rescanPhaseRef.current = "running";
         setRescanPhase("running");
@@ -750,8 +794,11 @@ function App() {
         phase: startupStatus.phase,
         label: presentation.label,
         title: presentation.title,
-        message: startupStatus.message,
-        footerLabel: "核心连接",
+        message:
+          startupStatus.phase === "loading"
+            ? "请稍候，准备完成后就可以开始整理和搜索。"
+            : "请重新打开应用后再试。",
+        footerLabel: "当前状态",
         footer: presentation.footer,
       };
     }
@@ -766,8 +813,8 @@ function App() {
         phase: "ready",
         label: presentation.label,
         title: presentation.title,
-        message: startupStatus.message,
-        footerLabel: "核心连接",
+        message: "你的资料已准备好，可以开始整理和搜索。",
+        footerLabel: "当前状态",
         footer: presentation.footer,
       };
     }
@@ -780,17 +827,17 @@ function App() {
       label: healthPresentation.label,
       title: healthPresentation.title,
       message: isRescanBusy
-        ? "正在建立或刷新本地索引，已提交的内容仍可搜索。"
-        : (indexHealth?.message ?? "正在读取本地索引状态。"),
+        ? "正在整理你的资料，已经完成的内容仍可搜索。"
+        : healthPresentation.message,
       footerLabel: `${formatCount(filesIndexed)} 个文件 / ${formatCount(
         documentsIndexed,
-      )} 篇正文`,
+      )} 项可搜索内容`,
       footer:
         healthState === "indexing"
           ? "正在更新"
           : watchState === "running"
-            ? "自动同步已开启"
-            : "自动同步未开启",
+            ? "自动更新已开启"
+            : "自动更新未开启",
     };
   })();
   const needsIndexRetry =
@@ -804,7 +851,7 @@ function App() {
     const normalizedRootPath = rootPath.trim();
     if (normalizedRootPath.length === 0 || isRescanBusy) {
       if (normalizedRootPath.length === 0) {
-        setRescanMessage("请先填写扫描目录。");
+        setRescanMessage("请先填写资料文件夹。");
       }
       return;
     }
@@ -812,7 +859,6 @@ function App() {
     setSummary(null);
     setIncrementalSummary(null);
     setProgress(emptyProgress);
-    setScanId(null);
     activeScanIdRef.current = null;
     rescanPhaseRef.current = "starting";
     setRescanPhase("starting");
@@ -837,17 +883,17 @@ function App() {
 
       if (rescanPhaseRef.current === "starting") {
         activeScanIdRef.current = response.scanId;
-        setScanId(response.scanId);
         rescanPhaseRef.current = "running";
         setRescanPhase("running");
         setRescanMessage(rescanPhasePresentation.running.title);
       }
     } catch (error) {
       activeScanIdRef.current = null;
-      setScanId(null);
       rescanPhaseRef.current = "failed";
       setRescanPhase("failed");
-      setRescanMessage(safeCommandMessage(error, "无法启动手动重扫。"));
+      setRescanMessage(
+        safeCommandMessage(error, "无法开始整理，请检查文件夹路径后重试。"),
+      );
 
       try {
         const response = await invoke<unknown>("get_watch_status");
@@ -898,13 +944,18 @@ function App() {
       if (activeScanIdRef.current === currentScanId) {
         rescanPhaseRef.current = "running";
         setRescanPhase("running");
-        setRescanMessage(safeCommandMessage(error, "无法取消手动重扫。"));
+        setRescanMessage(
+          safeCommandMessage(error, "无法停止整理，请稍后再试。"),
+        );
       }
     }
   };
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        跳到主要内容
+      </a>
       <aside className="side-rail" aria-label="Nexus 导航">
         <div>
           <div className="brand-lockup">
@@ -920,15 +971,10 @@ function App() {
               <span className="brand-name">Nexus</span>
             </div>
           </div>
-          <p className="rail-caption">个人数据操作系统</p>
+          <p className="rail-caption">你的资料，随时找回</p>
         </div>
 
-        <nav className="rail-nav" aria-label="里程碑">
-          <div className="rail-item quiet">
-            <span className="rail-item-index">00</span>
-            <span className="rail-item-label">工程基础</span>
-            <span className="rail-item-state">完成</span>
-          </div>
+        <nav className="rail-nav" aria-label="主要功能">
           <button
             className={`rail-item ${activeView === "index" ? "active" : "quiet"}`}
             type="button"
@@ -938,9 +984,9 @@ function App() {
             aria-current={activeView === "index" ? "page" : undefined}
           >
             <span className="rail-item-index">01</span>
-            <span className="rail-item-label">文件索引</span>
+            <span className="rail-item-label">整理资料</span>
             <span className="rail-item-state">
-              {activeView === "index" ? "当前" : "返回"}
+              {activeView === "index" ? "当前" : "打开"}
             </span>
           </button>
           <button
@@ -951,7 +997,7 @@ function App() {
             }}
             aria-current={activeView === "search" ? "page" : undefined}
           >
-            <span className="rail-item-index">03</span>
+            <span className="rail-item-index">02</span>
             <span className="rail-item-label">全文搜索</span>
             <span className="rail-item-state">
               {activeView === "search" ? "当前" : "打开"}
@@ -960,27 +1006,27 @@ function App() {
         </nav>
 
         <div className="rail-footer">
-          <span className="rail-footer-label">存储模式</span>
+          <span className="rail-footer-label">资料位置</span>
           <div className="local-badge">
             <span className="status-dot" aria-hidden="true" />
-            仅本地
+            只在这台设备
           </div>
-          <p>让重要数据始终留在身边。</p>
+          <p>你的文件不会离开这台设备。</p>
         </div>
       </aside>
 
-      <main className="main-surface">
+      <main id="main-content" className="main-surface" tabIndex={-1}>
         <header className="topbar">
           <div className="breadcrumb">
-            <span>工作区</span>
+            <span>我的资料</span>
             <span className="breadcrumb-separator" aria-hidden="true">
               /
             </span>
-            <strong>{activeView === "search" ? "全文搜索" : "文件索引"}</strong>
+            <strong>{activeView === "search" ? "全文搜索" : "整理资料"}</strong>
           </div>
           <div className="topbar-meta">
-            <span className="version-pill">v0.1.0</span>
-            <span className="topbar-note">离线优先</span>
+            <span className="version-pill">资料留在本机</span>
+            <span className="topbar-note">无需联网</span>
           </div>
         </header>
 
@@ -994,17 +1040,17 @@ function App() {
             <>
               <section className="hero" aria-labelledby="hero-title">
                 <div className="hero-copy">
-                  <p className="eyebrow">Nexus / 本地数据索引</p>
+                  <p className="eyebrow">整理你的资料</p>
                   <h1 id="hero-title">
                     个人数据，
                     <span>留在身边。</span>
                   </h1>
                   <p className="hero-lede">
-                    为文件、笔记、代码与想法搭建一处安静可靠的本地基础。
+                    把文件、笔记和代码整理好，需要时马上找得到。
                   </p>
                   <div className="hero-meta">
-                    <span>当前界面</span>
-                    <strong>文件索引</strong>
+                    <span>当前功能</span>
+                    <strong>整理资料</strong>
                   </div>
                 </div>
 
@@ -1013,7 +1059,7 @@ function App() {
                   aria-labelledby="status-title"
                 >
                   <div className="status-card-header">
-                    <span className="eyebrow">运行状态</span>
+                    <span className="eyebrow">资料状态</span>
                     <span className="status-state" aria-live="polite">
                       <span className="status-dot" aria-hidden="true" />
                       {statusCard.label}
@@ -1041,18 +1087,21 @@ function App() {
                 aria-labelledby="rescan-title"
               >
                 <div className="section-heading rescan-heading">
-                  <p className="eyebrow">本地索引 / 手动任务</p>
-                  <h2 id="rescan-title">从一处目录开始。</h2>
+                  <p className="eyebrow">整理资料</p>
+                  <h2 id="rescan-title">先选择一个文件夹。</h2>
                   <p>
-                    扫描文件元数据并建立正文索引，所有数据与任务状态都保留在本地。目录路径由你明确输入。
+                    Nexus
+                    会在这台设备上整理文件内容，供你稍后搜索；原始文件不会被上传。
                   </p>
                 </div>
 
                 <div className="rescan-card">
                   <div className="rescan-card-header">
                     <div>
-                      <span className="rescan-card-index">01 / 初始索引</span>
-                      <h3>建立可检索的本地内容</h3>
+                      <span className="rescan-card-index">
+                        第一步 / 选择资料
+                      </span>
+                      <h3>让这些资料可以被找到</h3>
                     </div>
                     <div
                       className={`scan-phase scan-phase-${rescanPhase}`}
@@ -1066,11 +1115,11 @@ function App() {
                   <div
                     className={`watch-sync-status watch-sync-status-${watchPhase}`}
                     aria-live="polite"
-                    aria-label="文件自动同步状态"
+                    aria-label="文件自动更新状态"
                   >
                     <span className="status-dot" aria-hidden="true" />
                     <span>
-                      自动同步 · {watchPhasePresentation[watchPhase].label}
+                      自动更新 · {watchPhasePresentation[watchPhase].label}
                     </span>
                     <small>{watchMessage}</small>
                   </div>
@@ -1083,8 +1132,8 @@ function App() {
                     }}
                   >
                     <label className="path-label" htmlFor="scan-root-path">
-                      扫描目录
-                      <span>已保存来源会自动回填</span>
+                      资料文件夹
+                      <span>上次使用的文件夹会自动填入</span>
                     </label>
                     <div className="path-entry">
                       <span className="path-prefix" aria-hidden="true">
@@ -1113,8 +1162,7 @@ function App() {
                       />
                     </div>
                     <p id="scan-root-help" className="path-help">
-                      支持 Windows
-                      完整路径；成功索引后会记住此来源。扫描过程中不会上传文件或文件名。
+                      填写文件夹完整路径。整理完成后会记住它；你的文件和文件名不会离开这台设备。
                     </p>
                     <div className="scan-actions">
                       <button
@@ -1125,8 +1173,8 @@ function App() {
                         {rescanPhase === "starting"
                           ? "准备中…"
                           : needsIndexRetry
-                            ? "重新索引"
-                            : "开始索引"}
+                            ? "重新整理"
+                            : "开始整理"}
                       </button>
                       <button
                         className="button button-secondary"
@@ -1136,7 +1184,7 @@ function App() {
                         }}
                         disabled={!isRescanBusy || rescanPhase === "cancelling"}
                       >
-                        {rescanPhase === "cancelling" ? "取消中…" : "取消任务"}
+                        {rescanPhase === "cancelling" ? "停止中…" : "停止整理"}
                       </button>
                     </div>
                   </form>
@@ -1151,78 +1199,74 @@ function App() {
                     <div
                       className={`progress-track progress-track-${rescanPhase}`}
                       role="progressbar"
-                      aria-label="本地重扫进度"
+                      aria-label="资料整理进度"
                       aria-valuemin={0}
                       aria-valuetext={`${formatCount(progress.processed)} 项已处理`}
                     >
                       <span className="progress-fill" aria-hidden="true" />
                     </div>
-                    <div className="scan-metrics" aria-label="重扫统计">
+                    <div className="scan-metrics" aria-label="整理进度统计">
                       <div>
-                        <span>成功</span>
+                        <span>已整理文件</span>
                         <strong>{formatCount(progress.filesSucceeded)}</strong>
                       </div>
                       <div>
-                        <span>跳过</span>
+                        <span>已跳过</span>
                         <strong>{formatCount(progress.pathsSkipped)}</strong>
                       </div>
                       <div>
-                        <span>失败</span>
+                        <span>需要注意</span>
                         <strong>{formatCount(progress.filesFailed)}</strong>
                       </div>
                     </div>
                     <div
                       className="scan-metrics document-metrics"
-                      aria-label="正文索引统计"
+                      aria-label="可搜索内容统计"
                     >
                       <div>
-                        <span>正文写入</span>
+                        <span>可搜索内容</span>
                         <strong>
                           {formatCount(progress.documentsSucceeded)}
                         </strong>
                       </div>
                       <div>
-                        <span>格式跳过</span>
+                        <span>未支持格式</span>
                         <strong>
                           {formatCount(progress.documentsSkipped)}
                         </strong>
                       </div>
                       <div>
-                        <span>正文失败</span>
+                        <span>需要重试</span>
                         <strong>{formatCount(progress.documentsFailed)}</strong>
                       </div>
                     </div>
                   </div>
 
                   {summary !== null && rescanPhase === "completed" ? (
-                    <div className="scan-result" aria-label="重扫结果">
-                      <span className="eyebrow">本次结果</span>
+                    <div className="scan-result" aria-label="整理结果">
+                      <span className="eyebrow">整理结果</span>
                       <div className="result-grid">
                         <div>
-                          <span>写入成功</span>
+                          <span>已整理文件</span>
                           <strong>{formatCount(summary.filesSucceeded)}</strong>
                         </div>
                         <div>
-                          <span>正文写入</span>
+                          <span>可搜索内容</span>
                           <strong>
                             {formatCount(summary.documentsSucceeded)}
                           </strong>
                         </div>
                         <div>
-                          <span>正文失败</span>
+                          <span>需要注意</span>
                           <strong>
-                            {formatCount(summary.documentsFailed)}
+                            {formatCount(
+                              summary.filesFailed + summary.documentsFailed,
+                            )}
                           </strong>
                         </div>
                         <div>
-                          <span>移除旧记录</span>
+                          <span>已移除旧内容</span>
                           <strong>{formatCount(summary.recordsRemoved)}</strong>
-                        </div>
-                        <div>
-                          <span>已提交批次</span>
-                          <strong>
-                            {formatCount(summary.batchesCommitted)}
-                          </strong>
                         </div>
                       </div>
                     </div>
@@ -1230,21 +1274,18 @@ function App() {
 
                   {rescanPhase === "cancelled" ? (
                     <p className="scan-result-note">
-                      本轮任务已停止；已提交的单文件正文索引会保留，未完成的元数据重扫不会应用。
+                      这次整理已停止；已经保存的内容会保留，未完成部分不会影响原始文件。
                     </p>
                   ) : null}
 
                   {incrementalSummary !== null ? (
                     <p className="watch-result-note" aria-live="polite">
-                      最近一次自动同步：更新{" "}
+                      最近一次自动更新：更新{" "}
                       {formatCount(incrementalSummary.filesUpdated)} 项，移除{" "}
-                      {formatCount(incrementalSummary.filesRemoved)} 项，失败{" "}
-                      {formatCount(incrementalSummary.filesFailed)} 项。
+                      {formatCount(incrementalSummary.filesRemoved)}{" "}
+                      项，需要注意 {formatCount(incrementalSummary.filesFailed)}{" "}
+                      项。
                     </p>
-                  ) : null}
-
-                  {scanId !== null && !isRescanBusy ? (
-                    <span className="scan-task-id">任务编号 / {scanId}</span>
                   ) : null}
                 </div>
               </section>
@@ -1254,8 +1295,8 @@ function App() {
                 aria-labelledby="principles-title"
               >
                 <div className="section-heading">
-                  <p className="eyebrow">运行原则</p>
-                  <h2 id="principles-title">先建立信任。</h2>
+                  <p className="eyebrow">使用方式</p>
+                  <h2 id="principles-title">让资料更容易找回。</h2>
                 </div>
                 <div className="principles-grid">
                   {principles.map((principle) => (
@@ -1268,13 +1309,13 @@ function App() {
                 </div>
               </section>
 
-              <section className="next-step" aria-label="下一里程碑">
+              <section className="next-step" aria-label="使用提示">
                 <div>
-                  <span className="eyebrow">下一步</span>
-                  <strong>M4 / 增量索引</strong>
+                  <span className="eyebrow">小提示</span>
+                  <strong>整理完成后，直接搜索就好。</strong>
                 </div>
                 <span className="next-step-copy">
-                  让文件变化后，已有内容索引保持同步。
+                  文件发生变化时，Nexus 会在本机自动更新内容。
                 </span>
                 <span className="next-step-arrow" aria-hidden="true">
                   →
@@ -1284,9 +1325,9 @@ function App() {
           )}
 
           <footer className="page-footer">
-            <span>Nexus / 本地优先个人数据操作系统</span>
+            <span>你的资料只保留在这台设备上。</span>
             <span>
-              {activeView === "search" ? "全文搜索" : "文件索引"} · 2026
+              {activeView === "search" ? "全文搜索" : "整理资料"} · 2026
             </span>
           </footer>
         </div>

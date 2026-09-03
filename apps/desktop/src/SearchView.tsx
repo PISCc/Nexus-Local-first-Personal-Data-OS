@@ -40,22 +40,25 @@ type SearchViewProps = {
 
 const startupPresentation: Record<
   StartupPhase,
-  { label: string; title: string; footer: string }
+  { label: string; title: string; message: string; footer: string }
 > = {
   loading: {
-    label: "正在检查",
-    title: "正在连接本地核心。",
-    footer: "检查中",
+    label: "准备中",
+    title: "正在准备你的资料。",
+    message: "请稍候，准备完成后就可以开始搜索。",
+    footer: "正在准备",
   },
   ready: {
-    label: "本地 / 就绪",
-    title: "基础界面已启动。",
-    footer: "连接正常",
+    label: "已准备好",
+    title: "你的资料可以搜索了。",
+    message: "输入关键词，找到后可以直接打开原文件。",
+    footer: "随时可搜索",
   },
   degraded: {
-    label: "降级 / 需处理",
-    title: "本地核心暂不可用。",
-    footer: "尚未连接",
+    label: "暂时不可用",
+    title: "暂时无法读取你的资料。",
+    message: "请重新打开应用后再试。",
+    footer: "需要重试",
   },
 };
 
@@ -150,7 +153,7 @@ function invokeSearch(query: string, limit: number): Promise<unknown> {
 
 function safeSearchMessage(value: unknown, fallback: string): string {
   if (value instanceof SearchTimeoutError) {
-    return "本地搜索响应超时，请稍后重试；如果索引正在更新，请等待完成。";
+    return "搜索花费的时间比预期长，请稍后重试。";
   }
 
   if (value instanceof Error) {
@@ -175,40 +178,51 @@ function formatCount(value: number): string {
 }
 
 function formatResultType(result: SearchResult): string {
-  if (result.fileType !== null && result.fileType.length > 0) {
-    return result.fileType;
+  const extension = result.extension?.replace(/^\./u, "").toLowerCase();
+  const extensionLabels: Record<string, string> = {
+    txt: "文本",
+    md: "Markdown",
+    py: "Python",
+    rs: "Rust",
+    js: "JavaScript",
+    ts: "TypeScript",
+    java: "Java",
+    cpp: "C++",
+    json: "JSON",
+    html: "HTML",
+    htm: "HTML",
+    docx: "Word 文档",
+    pdf: "PDF",
+  };
+
+  if (extension !== undefined && extension in extensionLabels) {
+    return extensionLabels[extension];
   }
 
-  if (result.extension !== null && result.extension.length > 0) {
-    return `${result.extension.toUpperCase()} 文件`;
+  if (result.fileType !== null && result.fileType.startsWith("text/")) {
+    return "文本";
   }
 
-  return "本地文档";
+  return "文档";
 }
 
 function formatResultDate(timestamp: number | null): string {
   if (timestamp === null) {
-    return "时间未知";
+    return "修改时间未知";
   }
 
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) {
-    return "时间未知";
+    return "修改时间未知";
   }
 
-  return new Intl.DateTimeFormat("zh-CN", {
+  const formatted = new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(date);
-}
 
-function formatRelevance(relevance: number | null): string | null {
-  return relevance === null ? null : relevance.toFixed(2);
-}
-
-function formatScore(score: number | null): string | null {
-  return score === null ? null : score.toFixed(4);
+  return `修改于 ${formatted}`;
 }
 
 function renderSnippet(snippet: string) {
@@ -226,7 +240,7 @@ function renderSnippet(snippet: string) {
   });
 }
 
-function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
+function SearchView({ startupPhase }: SearchViewProps) {
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [phase, setPhase] = useState<SearchPhase>("idle");
@@ -271,7 +285,11 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
       setResults([]);
       setOpenError(null);
       setPhase("error");
-      setMessage("本地核心尚未就绪，请等待连接完成后重试。");
+      setMessage(
+        startupPhase === "loading"
+          ? "资料还在准备中，请稍候再试。"
+          : "暂时无法读取你的资料，请重新打开应用后再试。",
+      );
       return;
     }
 
@@ -281,7 +299,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
     setResults([]);
     setOpenError(null);
     setPhase("loading");
-    setMessage("正在本地索引中查找。");
+    setMessage("正在为你查找。");
 
     try {
       const response = await invokeSearch(
@@ -314,7 +332,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
       }
 
       setPhase("error");
-      setMessage(safeSearchMessage(error, "本地搜索暂时不可用。"));
+      setMessage(safeSearchMessage(error, "暂时无法搜索，请稍后再试。"));
     }
   };
 
@@ -342,7 +360,9 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
       });
     } catch (error) {
       if (activeRef.current) {
-        setOpenError(safeSearchMessage(error, "无法打开原始文件。"));
+        setOpenError(
+          safeSearchMessage(error, "无法打开这个文件，请确认文件仍然存在。"),
+        );
       }
     } finally {
       if (activeRef.current) {
@@ -356,29 +376,29 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
     phase === "success"
       ? `${formatCount(results.length)} 条结果`
       : phase === "loading"
-        ? "查询中"
+        ? "搜索中"
         : phase === "empty"
           ? "0 条结果"
-          : "等待查询";
+          : "还没有搜索";
 
   return (
     <>
       <section className="search-hero" aria-labelledby="search-title">
         <div className="search-hero-copy">
-          <p className="eyebrow">Nexus / M5 混合搜索</p>
+          <p className="eyebrow">找回你的资料</p>
           <h1 id="search-title">
             把想起的词，
             <span>找回来。</span>
           </h1>
           <p className="search-hero-lede">
-            在本地索引的文件、笔记与代码里，寻找可追溯的原始内容。
+            在文件、笔记和代码里，快速找到你要的内容。
           </p>
           <div className="search-flow" aria-label="搜索路径">
-            <span>query</span>
+            <span>输入</span>
             <span aria-hidden="true">→</span>
-            <span>result</span>
+            <span>找到</span>
             <span aria-hidden="true">→</span>
-            <span>source</span>
+            <span>原文件</span>
           </div>
         </div>
         <div className="search-scope" aria-label="搜索范围">
@@ -393,8 +413,8 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
           <span className="search-scope-index">03</span>
           <div>
             <span className="eyebrow">搜索范围</span>
-            <strong>本地全文 + 向量</strong>
-            <p>查询不会上传文件、文件名、向量或搜索历史。</p>
+            <strong>这台设备上的资料</strong>
+            <p>文件和搜索记录不会上传，每条结果都能回到原文件。</p>
           </div>
           <div
             className={`search-scope-status search-scope-status-${startupPhase}`}
@@ -407,7 +427,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
             <h2 id="search-status-title">
               {startupPresentation[startupPhase].title}
             </h2>
-            <p>{startupMessage}</p>
+            <p>{startupPresentation[startupPhase].message}</p>
             <span className="search-scope-status-footer">
               {startupPresentation[startupPhase].footer}
             </span>
@@ -417,9 +437,9 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
 
       <section className="search-workspace" aria-labelledby="search-form-title">
         <div className="search-section-heading">
-          <p className="eyebrow">本地索引 / 查询</p>
-          <h2 id="search-form-title">从一个词开始。</h2>
-          <p>关键词和筛选条件按 Enter 后执行；结果始终保留原文件引用。</p>
+          <p className="eyebrow">开始搜索</p>
+          <h2 id="search-form-title">输入你记得的词。</h2>
+          <p>按 Enter 搜索；结果会保留原文件位置，方便你直接打开。</p>
         </div>
 
         <div className="search-panel">
@@ -428,12 +448,12 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
             onSubmit={(event) => void handleSearch(event)}
           >
             <label className="search-label" htmlFor="document-search-query">
-              搜索本地文档
-              <span>Enter 执行</span>
+              搜索你的资料
+              <span>按 Enter 搜索</span>
             </label>
             <div className="search-input-entry">
               <span className="search-input-prefix" aria-hidden="true">
-                QUERY
+                搜索
               </span>
               <input
                 id="document-search-query"
@@ -444,7 +464,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
                   setQuery(event.target.value);
                   setOpenError(null);
                 }}
-                placeholder='例如：项目计划 或 filename:"会议记录"'
+                placeholder="例如：项目计划、会议记录或预算"
                 autoComplete="off"
                 spellCheck={false}
                 aria-describedby="search-query-help"
@@ -459,11 +479,11 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
               </button>
             </div>
             <p id="search-query-help" className="search-help">
-              支持关键词、双引号短语、filename、path、ext、type 和日期筛选。
+              可以输入关键词或短语，也可以按文件名、类型和日期缩小范围。
             </p>
             <div className="search-actions">
               <span className="search-query-example">
-                例如：<code>{'"季度计划" ext:md modified>=2026-01-01'}</code>
+                试试：季度计划、会议记录或项目预算
               </span>
               <button
                 className="button button-secondary"
@@ -471,7 +491,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
                 onClick={handleCancel}
                 disabled={!isLoading}
               >
-                取消查询
+                停止搜索
               </button>
             </div>
           </form>
@@ -485,11 +505,11 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
       >
         <div className="search-results-heading">
           <div>
-            <p className="eyebrow">检索结果</p>
+            <p className="eyebrow">找到的内容</p>
             <h2 id="search-results-title">
               {submittedQuery.length > 0
                 ? `“${submittedQuery}”`
-                : "等待一次查询"}
+                : "搜索结果会显示在这里"}
             </h2>
           </div>
           <span className="search-result-count" aria-live="polite">
@@ -506,7 +526,6 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
         {phase === "success" ? (
           <ol className="search-result-list" aria-label="搜索结果列表">
             {results.map((result, index) => {
-              const relevance = formatRelevance(result.relevance);
               const resultName = result.fileName ?? result.title;
 
               return (
@@ -527,19 +546,13 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
                         <span className="search-result-open-label">
                           {openingDocumentId === result.documentId
                             ? "打开中…"
-                            : "定位原文件 →"}
+                            : "打开原文件 →"}
                         </span>
                       </span>
                       <span className="search-result-meta">
                         <span>{resultName}</span>
                         <span>{formatResultType(result)}</span>
                         <span>{formatResultDate(result.modifiedAt)}</span>
-                        {relevance !== null ? (
-                          <span>词法 {relevance}</span>
-                        ) : null}
-                        {result.fusionScore !== null ? (
-                          <span>混合 {formatScore(result.fusionScore)}</span>
-                        ) : null}
                       </span>
                       <span className="search-result-path">
                         {result.sourcePath}
@@ -567,14 +580,14 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
               <strong>{message}</strong>
               <p>
                 {phase === "error"
-                  ? "请检查查询格式或确认本地核心仍然可用。"
+                  ? "请检查关键词或筛选条件后重试。"
                   : phase === "empty"
-                    ? "可以尝试更短的关键词，或移除一个筛选条件。"
+                    ? "换一个关键词或减少筛选条件再试试。"
                     : phase === "cancelled"
-                      ? "你可以修改查询条件后再次执行。"
+                      ? "可以修改关键词后再次搜索。"
                       : phase === "loading"
-                        ? "正在读取本地索引，请稍候。"
-                        : "查询结果会显示在这里，并保留原始文件路径。"}
+                        ? "正在查找，请稍候。"
+                        : "找到后可以直接打开原文件。"}
               </p>
             </div>
           </div>
@@ -583,12 +596,12 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
 
       <section className="search-notes" aria-label="搜索说明">
         <div>
-          <span className="eyebrow">搜索原则</span>
-          <strong>先给你确定的结果。</strong>
+          <span className="eyebrow">使用说明</span>
+          <strong>内容留在你的设备上。</strong>
         </div>
         <p>
-          当前搜索保留本地 lexical
-          index，并在可用时加入本地向量基线；不依赖人工智能或网络。
+          Nexus
+          只在本机整理和搜索文件，不上传文件内容、文件名或搜索记录；每条结果都保留原文件位置。
         </p>
         <span className="search-notes-rule" aria-hidden="true" />
       </section>

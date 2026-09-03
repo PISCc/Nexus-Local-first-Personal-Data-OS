@@ -45,7 +45,7 @@ function makeResult(overrides: Record<string, unknown> = {}) {
 }
 
 function submitSearch(query = "项目计划") {
-  fireEvent.change(screen.getByRole("searchbox", { name: /搜索本地文档/ }), {
+  fireEvent.change(screen.getByRole("searchbox", { name: /搜索你的资料/ }), {
     target: { value: query },
   });
   fireEvent.click(screen.getByRole("button", { name: "搜索" }));
@@ -89,8 +89,9 @@ describe("SearchView", () => {
     expect(
       screen.getByText("项目计划", { selector: "mark" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("词法 1.23")).toBeInTheDocument();
-    expect(screen.getByText("混合 0.0310")).toBeInTheDocument();
+    expect(screen.getByText("Markdown")).toBeInTheDocument();
+    expect(screen.queryByText("词法 1.23")).not.toBeInTheDocument();
+    expect(screen.queryByText("混合 0.0310")).not.toBeInTheDocument();
   });
 
   it("在 React 严格检查模式下仍接收搜索结果", async () => {
@@ -135,7 +136,9 @@ describe("SearchView", () => {
     submitSearch("malformed");
 
     await waitFor(() => {
-      expect(screen.getByText("本地搜索暂时不可用。")).toBeInTheDocument();
+      expect(
+        screen.getByText("暂时无法搜索，请稍后再试。"),
+      ).toBeInTheDocument();
     });
   });
 
@@ -149,10 +152,10 @@ describe("SearchView", () => {
 
     submitSearch();
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "取消查询" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "停止搜索" })).toBeEnabled();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "取消查询" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止搜索" }));
     expect(screen.getByText("本次搜索已取消。")).toBeInTheDocument();
 
     await act(async () => {
@@ -169,16 +172,14 @@ describe("SearchView", () => {
       render(<SearchView {...readyProps} />);
 
       submitSearch("卡住查询");
-      expect(screen.getByRole("button", { name: "取消查询" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "停止搜索" })).toBeEnabled();
 
       await act(async () => {
         vi.advanceTimersByTime(10_000);
       });
 
       expect(
-        screen.getByText(
-          "本地搜索响应超时，请稍后重试；如果索引正在更新，请等待完成。",
-        ),
+        screen.getByText("搜索花费的时间比预期长，请稍后重试。"),
       ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "搜索" })).toBeEnabled();
     } finally {
@@ -191,7 +192,7 @@ describe("SearchView", () => {
       <SearchView startupPhase="loading" startupMessage="正在连接本地核心。" />,
     );
 
-    fireEvent.change(screen.getByRole("searchbox", { name: /搜索本地文档/ }), {
+    fireEvent.change(screen.getByRole("searchbox", { name: /搜索你的资料/ }), {
       target: { value: "项目计划" },
     });
     expect(screen.getByRole("button", { name: "搜索" })).toBeDisabled();

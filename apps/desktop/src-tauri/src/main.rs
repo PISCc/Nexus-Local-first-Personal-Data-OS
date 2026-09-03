@@ -1,15 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    ffi::OsString,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
 };
+
+#[cfg(not(target_os = "windows"))]
+use std::process::Command as ProcessCommand;
 
 use nexus_core::{
     index_directory_with_control, index_document_embeddings, initialize,
@@ -376,13 +377,68 @@ fn open_local_document(path: &Path) -> Result<(), CommandError> {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_shell_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 fn spawn_open_command(path: &Path) -> Result<(), std::io::Error> {
-    let mut selection = OsString::from("/select,");
-    selection.push(path);
-    ProcessCommand::new("explorer.exe")
-        .arg(selection)
-        .spawn()
-        .map(|_| ())
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::{
+        Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK},
+        System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED},
+        UI::Shell::{Common::ITEMIDLIST, SHOpenFolderAndSelectItems, SHParseDisplayName},
+    };
+
+    let wide_path = windows_shell_path(path);
+    let mut item_id_list = null_mut::<ITEMIDLIST>();
+    let initialize_result = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
+    let should_uninitialize = matches!(initialize_result, S_OK | S_FALSE);
+
+    if initialize_result != S_OK
+        && initialize_result != S_FALSE
+        && initialize_result != RPC_E_CHANGED_MODE
+    {
+        return Err(std::io::Error::other("无法初始化 Windows Shell。"));
+    }
+
+    let parse_result = unsafe {
+        SHParseDisplayName(
+            wide_path.as_ptr(),
+            null_mut(),
+            &mut item_id_list,
+            0,
+            null_mut(),
+        )
+    };
+    let selection_result = if parse_result == S_OK {
+        // cidl=0 表示 item_id_list 是待选中的完整项目 ID，Shell 会打开父目录并选中该文件。
+        unsafe { SHOpenFolderAndSelectItems(item_id_list, 0, null(), 0) }
+    } else {
+        parse_result
+    };
+
+    if !item_id_list.is_null() {
+        unsafe { CoTaskMemFree(item_id_list.cast()) };
+    }
+    if should_uninitialize {
+        unsafe { CoUninitialize() };
+    }
+
+    if selection_result == S_OK {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "Windows Shell 定位失败（HRESULT 0x{:08X}）。",
+            selection_result as u32
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1322,6 +1378,20 @@ mod tests {
 
     static WATCH_ROOT_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
     static SEARCH_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn preserves_unicode_when_encoding_windows_shell_path() {
+        let path = PathBuf::from(r"C:\有机记忆场\原文件.md");
+        let wide_path = super::windows_shell_path(&path);
+
+        assert_eq!(wide_path.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&wide_path[..wide_path.len() - 1])
+                .expect("Windows Shell 路径应可还原"),
+            path.to_string_lossy().as_ref(),
+        );
+    }
 
     fn watch_root_test_path() -> PathBuf {
         let sequence = WATCH_ROOT_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
