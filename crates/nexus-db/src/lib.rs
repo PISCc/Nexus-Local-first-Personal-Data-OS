@@ -14,6 +14,7 @@ use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -118,6 +119,12 @@ pub fn initialize_database<P: AsRef<Path>>(path: P) -> Result<Connection, Databa
         path: path.clone(),
         source,
     })?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|source| DatabaseError::Open {
+            path: path.clone(),
+            source,
+        })?;
 
     let version = read_schema_version(&connection, &path)?;
 
@@ -211,11 +218,44 @@ fn apply_migration(
         })
 }
 
+/// 当前本地索引中已经提交的记录数量。
+///
+/// 文件数量来自 canonical 文件元数据表，正文数量来自 canonical 文档表；
+/// 临时重扫表和 FTS/embedding 派生表不参与统计。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexStatistics {
+    pub files_indexed: u64,
+    pub documents_indexed: u64,
+}
+
+/// 读取当前已提交的本地索引统计。
+pub fn get_index_statistics(
+    connection: &Connection,
+) -> Result<IndexStatistics, IndexStatisticsError> {
+    let (files_indexed, documents_indexed) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM file_metadata),
+                (SELECT COUNT(*) FROM documents)",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|source| IndexStatisticsError::Query { source })?;
+
+    Ok(IndexStatistics {
+        files_indexed: u64::try_from(files_indexed)
+            .map_err(|_| IndexStatisticsError::InvalidStoredCount)?,
+        documents_indexed: u64::try_from(documents_indexed)
+            .map_err(|_| IndexStatisticsError::InvalidStoredCount)?,
+    })
+}
+
 /// 本地文件的最小元数据记录。
 ///
 /// 时间字段统一使用 Unix epoch 毫秒；`None` 表示当前平台或文件系统无法提供
-/// 对应时间。`file_type` 只保存调用方提供的可选类型标签，M1 不读取文件内容做
-/// MIME 探测。文件路径的真实值由 `path` 保存，数据库内部使用平台相关的无损键。
+/// 对应时间。`file_type` 保存调用方提供的可选类型标签；核心扫描器对已知扩展名
+/// 使用不读取正文的稳定映射，未知类型仍为空。文件路径的真实值由 `path` 保存，
+/// 数据库内部使用平台相关的无损键。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMetadata {
     pub path: PathBuf,
@@ -937,8 +977,8 @@ pub struct DocumentRecord {
 /// 一次增量文件更新的数据库操作。
 ///
 /// `Upsert` 会先保存文件元数据；如果 `document` 为 `None`，则同时清理该路径的
-/// 旧正文记录。`Remove` 会按来源路径同时清理元数据和所有正文记录。调用方应把
-/// 一批相关操作交给 [`apply_file_mutations`]，数据库会在一个事务中提交它们。
+/// 旧正文记录。`Remove` 会按来源路径及其子路径同时清理元数据和正文记录。调用方
+/// 应把一批相关操作交给 [`apply_file_mutations`]，数据库会在一个事务中提交它们。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileMutation {
     Upsert(Box<FileMutationUpsert>),
@@ -1019,10 +1059,10 @@ pub fn apply_file_mutations(
             FileMutation::Remove { path } => {
                 let path = normalize_path(path)
                     .map_err(|source| FileMutationError::Metadata { source })?;
-                let path_key = path_key(&path);
+                let path_key = scope_path_key(&path);
                 let metadata_removed = transaction
                     .execute(
-                        "DELETE FROM file_metadata WHERE path_key = ?1",
+                        &delete_path_scope_sql("file_metadata", "path_key"),
                         params![&path_key],
                     )
                     .map_err(|source| FileMutationError::Metadata {
@@ -1033,7 +1073,7 @@ pub fn apply_file_mutations(
                     })?;
                 let documents_removed = transaction
                     .execute(
-                        "DELETE FROM documents WHERE source_path_key = ?1",
+                        &delete_path_scope_sql("documents", "source_path_key"),
                         params![&path_key],
                     )
                     .map_err(|source| FileMutationError::DocumentDelete { source })?;
@@ -1384,6 +1424,18 @@ fn path_key(path: &Path) -> Vec<u8> {
     path.to_string_lossy().into_owned().into_bytes()
 }
 
+fn delete_path_scope_sql(table: &str, column: &str) -> String {
+    let (separator, separator_length) = if cfg!(windows) {
+        ("X'5C00'", 2)
+    } else {
+        ("X'2F'", 1)
+    };
+
+    format!(
+        "DELETE FROM {table} WHERE {column} = ?1 OR (substr({column}, 1, length(?1)) = ?1 AND substr({column}, length(?1) + 1, {separator_length}) = {separator})"
+    )
+}
+
 #[cfg(unix)]
 fn path_from_key(key: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
@@ -1681,6 +1733,46 @@ fn delete_stale_documents_sql() -> &'static str {
                 ) = X'2F'
             )
      )"
+}
+
+/// 索引统计读取错误。
+#[derive(Debug)]
+pub enum IndexStatisticsError {
+    Query { source: rusqlite::Error },
+    InvalidStoredCount,
+}
+
+impl IndexStatisticsError {
+    /// 返回不包含 SQL 或本地内容的安全分类。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Query { .. } => "index_statistics_query",
+            Self::InvalidStoredCount => "index_statistics_invalid_count",
+        }
+    }
+
+    /// 返回可以直接展示给用户的非敏感中文说明。
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            Self::Query { .. } => "无法读取本地索引统计。",
+            Self::InvalidStoredCount => "本地索引统计已损坏。",
+        }
+    }
+}
+
+impl fmt::Display for IndexStatisticsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "读取索引统计失败: {}", self.kind())
+    }
+}
+
+impl Error for IndexStatisticsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Query { source } => Some(source),
+            Self::InvalidStoredCount => None,
+        }
+    }
 }
 
 /// 文件元数据持久化错误。
@@ -2001,11 +2093,12 @@ mod tests {
 
     use super::{
         apply_file_mutations, begin_file_metadata_rescan, delete_document, get_document,
-        get_file_metadata, initialize_database, list_document_batch, list_documents_for_path,
-        normalize_path, upsert_document, upsert_file_metadata, upsert_file_metadata_batch,
-        DatabaseError, DocumentRecord, DocumentStoreError, FileMetadata, FileMetadataError,
-        FileMutation, FileMutationError, FileMutationUpsert, CURRENT_SCHEMA_VERSION,
-        DOCUMENTS_MIGRATION_SQL, FILE_METADATA_MIGRATION_SQL, FOUNDATION_MIGRATION_SQL,
+        get_file_metadata, get_index_statistics, initialize_database, list_document_batch,
+        list_documents_for_path, normalize_path, upsert_document, upsert_file_metadata,
+        upsert_file_metadata_batch, DatabaseError, DocumentRecord, DocumentStoreError,
+        FileMetadata, FileMetadataError, FileMutation, FileMutationError, FileMutationUpsert,
+        CURRENT_SCHEMA_VERSION, DOCUMENTS_MIGRATION_SQL, FILE_METADATA_MIGRATION_SQL,
+        FOUNDATION_MIGRATION_SQL,
     };
 
     static TEMP_DIRECTORY_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -2130,6 +2223,10 @@ mod tests {
             schema_version(&connection),
             i64::from(CURRENT_SCHEMA_VERSION)
         );
+        let busy_timeout: i64 = connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("读取 SQLite 等待锁超时配置失败");
+        assert_eq!(busy_timeout, 5_000);
         assert!(table_exists(&connection, "nexus_metadata"));
         assert!(table_exists(&connection, "file_metadata"));
         assert!(table_exists(&connection, "documents"));
@@ -2504,6 +2601,37 @@ mod tests {
             .expect("读取已删除文档失败")
             .is_none());
         assert!(!delete_document(&connection, &document.id).expect("重复删除文档失败"));
+    }
+
+    #[test]
+    fn reports_only_committed_file_and_document_counts() {
+        let temporary_directory = TemporaryDirectory::new();
+        let database_path = temporary_directory.database_path();
+        let connection = initialize_database(&database_path).expect("初始化索引统计数据库失败");
+
+        assert_eq!(
+            get_index_statistics(&connection).expect("读取空索引统计失败"),
+            super::IndexStatistics::default()
+        );
+
+        let metadata = synthetic_metadata(&temporary_directory.path, 1);
+        upsert_file_metadata(&connection, &metadata).expect("写入索引统计元数据失败");
+        upsert_document(
+            &connection,
+            &DocumentRecord {
+                id: "file:index-statistics".to_owned(),
+                source_path: metadata.path,
+                title: "Index statistics".to_owned(),
+                body: "committed body".to_owned(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .expect("写入索引统计文档失败");
+
+        let statistics = get_index_statistics(&connection).expect("读取索引统计失败");
+        assert_eq!(statistics.files_indexed, 1);
+        assert_eq!(statistics.documents_indexed, 1);
     }
 
     #[test]

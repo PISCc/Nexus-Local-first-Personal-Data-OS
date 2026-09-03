@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SearchView from "./SearchView";
 
@@ -92,6 +93,23 @@ describe("SearchView", () => {
     expect(screen.getByText("混合 0.0310")).toBeInTheDocument();
   });
 
+  it("在 React 严格检查模式下仍接收搜索结果", async () => {
+    mockedInvoke.mockResolvedValueOnce({ results: [makeResult()] });
+    render(
+      <StrictMode>
+        <SearchView {...readyProps} />
+      </StrictMode>,
+    );
+
+    submitSearch();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("项目计划", { selector: "strong" }),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("显示空结果和后端安全错误", async () => {
     mockedInvoke.mockResolvedValueOnce({ results: [] });
     render(<SearchView {...readyProps} />);
@@ -142,6 +160,45 @@ describe("SearchView", () => {
       await pendingSearch;
     });
     expect(screen.queryByText("C:\\Nexus\\notes.md")).not.toBeInTheDocument();
+  });
+
+  it("搜索命令没有返回时会退出查询中状态", async () => {
+    vi.useFakeTimers();
+    try {
+      mockedInvoke.mockReturnValueOnce(new Promise<never>(() => {}));
+      render(<SearchView {...readyProps} />);
+
+      submitSearch("卡住查询");
+      expect(screen.getByRole("button", { name: "取消查询" })).toBeEnabled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+
+      expect(
+        screen.getByText(
+          "本地搜索响应超时，请稍后重试；如果索引正在更新，请等待完成。",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "搜索" })).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("本地核心未就绪时不会提交搜索", () => {
+    render(
+      <SearchView startupPhase="loading" startupMessage="正在连接本地核心。" />,
+    );
+
+    fireEvent.change(screen.getByRole("searchbox", { name: /搜索本地文档/ }), {
+      target: { value: "项目计划" },
+    });
+    expect(screen.getByRole("button", { name: "搜索" })).toBeDisabled();
+    expect(mockedInvoke).not.toHaveBeenCalledWith(
+      "search_documents",
+      expect.anything(),
+    );
   });
 
   it("通过文档 ID 请求定位原始文件", async () => {

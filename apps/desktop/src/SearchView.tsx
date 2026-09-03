@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 const DEFAULT_SEARCH_LIMIT = 100;
+const SEARCH_TIMEOUT_MS = 10_000;
 
 type SearchPhase =
   "idle" | "loading" | "success" | "empty" | "error" | "cancelled";
@@ -121,7 +122,37 @@ function isSearchResponse(value: unknown): value is SearchResponse {
   );
 }
 
+class SearchTimeoutError extends Error {
+  constructor() {
+    super("search_timeout");
+    this.name = "SearchTimeoutError";
+  }
+}
+
+function invokeSearch(query: string, limit: number): Promise<unknown> {
+  let timeoutId: number | undefined;
+
+  return Promise.race([
+    invoke<unknown>("search_documents", {
+      request: { query, limit },
+    }),
+    new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        reject(new SearchTimeoutError());
+      }, SEARCH_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+}
+
 function safeSearchMessage(value: unknown, fallback: string): string {
+  if (value instanceof SearchTimeoutError) {
+    return "本地搜索响应超时，请稍后重试；如果索引正在更新，请等待完成。";
+  }
+
   if (value instanceof Error) {
     return fallback;
   }
@@ -209,6 +240,8 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
   const activeRef = useRef(true);
 
   useEffect(() => {
+    activeRef.current = true;
+
     return () => {
       activeRef.current = false;
       requestIdRef.current += 1;
@@ -232,6 +265,16 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
       return;
     }
 
+    if (startupPhase !== "ready") {
+      requestIdRef.current += 1;
+      setSubmittedQuery(normalizedQuery);
+      setResults([]);
+      setOpenError(null);
+      setPhase("error");
+      setMessage("本地核心尚未就绪，请等待连接完成后重试。");
+      return;
+    }
+
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setSubmittedQuery(normalizedQuery);
@@ -241,12 +284,10 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
     setMessage("正在本地索引中查找。");
 
     try {
-      const response = await invoke<unknown>("search_documents", {
-        request: {
-          query: normalizedQuery,
-          limit: DEFAULT_SEARCH_LIMIT,
-        },
-      });
+      const response = await invokeSearch(
+        normalizedQuery,
+        DEFAULT_SEARCH_LIMIT,
+      );
 
       if (
         !activeRef.current ||
@@ -332,8 +373,23 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
           <p className="search-hero-lede">
             在本地索引的文件、笔记与代码里，寻找可追溯的原始内容。
           </p>
+          <div className="search-flow" aria-label="搜索路径">
+            <span>query</span>
+            <span aria-hidden="true">→</span>
+            <span>result</span>
+            <span aria-hidden="true">→</span>
+            <span>source</span>
+          </div>
         </div>
         <div className="search-scope" aria-label="搜索范围">
+          <img
+            className="search-scope-icon"
+            src="/nexus-product-icon.png"
+            alt=""
+            width="108"
+            height="108"
+            aria-hidden="true"
+          />
           <span className="search-scope-index">03</span>
           <div>
             <span className="eyebrow">搜索范围</span>
@@ -397,7 +453,7 @@ function SearchView({ startupPhase, startupMessage }: SearchViewProps) {
               <button
                 className="button button-primary search-submit"
                 type="submit"
-                disabled={isLoading}
+                disabled={isLoading || startupPhase !== "ready"}
               >
                 {isLoading ? "搜索中…" : "搜索"}
               </button>

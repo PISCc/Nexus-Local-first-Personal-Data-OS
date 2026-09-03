@@ -16,9 +16,9 @@ use std::{
 use nexus_core::{
     apply_incremental_batch_with_retry, index_document_embeddings,
     refresh_document_embeddings_for_paths, watch_directory, EmbeddingIndexError,
-    EmbeddingIndexOptions, EventBatchOptions, EventBatcher, FileWatchError, IncrementalBatch,
-    IncrementalBatchSummary, IncrementalChange, IncrementalIndexError, IncrementalIndexOptions,
-    LocalFeatureEmbedding, RescanControl,
+    EmbeddingIndexOptions, EventBatchError, EventBatchOptions, EventBatcher, FileEvent,
+    FileWatchError, IncrementalBatch, IncrementalBatchSummary, IncrementalChange,
+    IncrementalIndexError, IncrementalIndexOptions, LocalFeatureEmbedding, RescanControl,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -102,7 +102,29 @@ struct ActiveWatch {
     id: u64,
     control: RescanControl,
     shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    config: WatchRestartConfig,
+}
+
+#[derive(Clone)]
+pub(crate) struct WatchRestartConfig {
+    pub database_path: std::path::PathBuf,
+    pub root_path: std::path::PathBuf,
+    pub options: IncrementalIndexOptions,
+}
+
+impl WatchRestartConfig {
+    pub(crate) fn matches(
+        &self,
+        database_path: &std::path::Path,
+        root_path: &std::path::Path,
+        options: &IncrementalIndexOptions,
+    ) -> bool {
+        self.database_path == database_path
+            && self.root_path == root_path
+            && self.options == *options
+    }
 }
 
 #[derive(Clone, Default)]
@@ -117,9 +139,11 @@ struct WatchTask {
     manager: WatchManager,
     control: RescanControl,
     shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     database_path: std::path::PathBuf,
     root_path: std::path::PathBuf,
     options: IncrementalIndexOptions,
+    initial_rescan: bool,
 }
 
 impl WatchManager {
@@ -129,6 +153,27 @@ impl WatchManager {
         database_path: std::path::PathBuf,
         root_path: std::path::PathBuf,
         options: IncrementalIndexOptions,
+    ) -> Result<u64, WatchManagerError> {
+        self.start_internal(app, database_path, root_path, options, false)
+    }
+
+    pub fn start_after_rescan(
+        &self,
+        app: AppHandle,
+        database_path: std::path::PathBuf,
+        root_path: std::path::PathBuf,
+        options: IncrementalIndexOptions,
+    ) -> Result<u64, WatchManagerError> {
+        self.start_internal(app, database_path, root_path, options, true)
+    }
+
+    fn start_internal(
+        &self,
+        app: AppHandle,
+        database_path: std::path::PathBuf,
+        root_path: std::path::PathBuf,
+        options: IncrementalIndexOptions,
+        initial_rescan: bool,
     ) -> Result<u64, WatchManagerError> {
         let mut active = self
             .active
@@ -151,22 +196,32 @@ impl WatchManager {
         };
         let control = RescanControl::new();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let config = WatchRestartConfig {
+            database_path: database_path.clone(),
+            root_path: root_path.clone(),
+            options: options.clone(),
+        };
         let task = WatchTask {
             id,
             app,
             manager: self.clone(),
             control: control.clone(),
             shutdown: shutdown.clone(),
+            paused: paused.clone(),
             database_path,
             root_path,
             options,
+            initial_rescan,
         };
 
         *active = Some(ActiveWatch {
             id,
             control,
             shutdown,
+            paused,
             join: None,
+            config,
         });
 
         let thread_result = thread::Builder::new()
@@ -187,17 +242,43 @@ impl WatchManager {
         Ok(id)
     }
 
-    pub fn stop(&self) {
-        let active = self.active.lock().ok().and_then(|mut active| active.take());
-        let Some(mut active) = active else {
-            return;
+    pub fn pause(&self) -> Result<Option<WatchRestartConfig>, WatchManagerError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WatchManagerError::StateUnavailable)?;
+        let Some(active) = active.as_ref() else {
+            return Ok(None);
         };
 
+        active.paused.store(true, Ordering::Release);
+        Ok(Some(active.config.clone()))
+    }
+
+    pub fn resume(&self) -> Result<bool, WatchManagerError> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| WatchManagerError::StateUnavailable)?;
+        let Some(active) = active.as_ref() else {
+            return Ok(false);
+        };
+
+        active.paused.store(false, Ordering::Release);
+        Ok(true)
+    }
+
+    pub fn stop(&self) -> Option<WatchRestartConfig> {
+        let active = self.active.lock().ok().and_then(|mut active| active.take());
+        let mut active = active?;
+
+        let config = active.config.clone();
         active.control.cancel();
         active.shutdown.store(true, Ordering::Release);
         if let Some(join) = active.join.take() {
             let _ = join.join();
         }
+        Some(config)
     }
 
     pub fn status(&self) -> Result<WatchStatusResponse, WatchManagerError> {
@@ -240,6 +321,7 @@ fn run_watch(task: WatchTask) {
     let watcher = match watch_directory(&task.root_path) {
         Ok(watcher) => watcher,
         Err(error) => {
+            task.manager.clear(task.id);
             emit_status(
                 &task.app,
                 WatchStatusEvent {
@@ -250,7 +332,6 @@ fn run_watch(task: WatchTask) {
                 },
             );
             error!(error_kind = error.kind(), "文件监听启动失败");
-            task.manager.clear(task.id);
             return;
         }
     };
@@ -258,6 +339,7 @@ fn run_watch(task: WatchTask) {
     let mut batcher = match EventBatcher::new(&task.root_path, EventBatchOptions::default()) {
         Ok(batcher) => batcher,
         Err(error) => {
+            task.manager.clear(task.id);
             emit_status(
                 &task.app,
                 WatchStatusEvent {
@@ -268,7 +350,6 @@ fn run_watch(task: WatchTask) {
                 },
             );
             error!(error_kind = error.kind(), "文件事件归并器启动失败");
-            task.manager.clear(task.id);
             return;
         }
     };
@@ -283,10 +364,34 @@ fn run_watch(task: WatchTask) {
         },
     );
 
+    if task.initial_rescan {
+        if let Err(error) = queue_full_rescan(&mut batcher) {
+            warn!(error_kind = error.kind(), "无法安排监听启动后的追赶重扫");
+        }
+    }
+
     let mut retry_batch: Option<(IncrementalBatch, Instant)> = None;
+    let mut terminal_error: Option<FileWatchError> = None;
     loop {
         if is_stopping(&task) {
             break;
+        }
+
+        if task.paused.load(Ordering::Acquire) {
+            match watcher.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(_event)) => {
+                    if let Err(error) = queue_full_rescan(&mut batcher) {
+                        warn!(error_kind = error.kind(), "忽略暂停期间的无效文件事件");
+                    }
+                }
+                Ok(None) => {}
+                Err(error @ FileWatchError::ChannelClosed) => {
+                    terminal_error = Some(error);
+                    break;
+                }
+                Err(error) => warn!(error_kind = error.kind(), "文件监听报告暂时性错误"),
+            }
+            continue;
         }
 
         if let Some((batch, retry_at)) = retry_batch.take() {
@@ -327,21 +432,47 @@ fn run_watch(task: WatchTask) {
                 }
             }
             Ok(None) => {}
-            Err(FileWatchError::ChannelClosed) => break,
+            Err(error @ FileWatchError::ChannelClosed) => {
+                terminal_error = Some(error);
+                break;
+            }
             Err(error) => warn!(error_kind = error.kind(), "文件监听报告暂时性错误"),
         }
     }
 
+    let (state, message, error_kind) = terminal_watch_status(terminal_error.as_ref());
+    task.manager.clear(task.id);
     emit_status(
         &task.app,
         WatchStatusEvent {
             watch_id: task.id,
-            state: "stopped",
-            message: "文件自动同步已停止。",
-            error_kind: None,
+            state,
+            message,
+            error_kind,
         },
     );
-    task.manager.clear(task.id);
+}
+
+fn queue_full_rescan(batcher: &mut EventBatcher) -> Result<(), EventBatchError> {
+    batcher.push(
+        FileEvent::RescanRequired {
+            root: batcher.root().to_path_buf(),
+        },
+        Instant::now(),
+    )
+}
+
+fn terminal_watch_status(
+    error: Option<&FileWatchError>,
+) -> (&'static str, &'static str, Option<&'static str>) {
+    match error {
+        Some(error) => (
+            "failed",
+            "文件自动同步已失效，需要重新启动。",
+            Some(error.kind()),
+        ),
+        None => ("stopped", "文件自动同步已停止。", None),
+    }
 }
 
 fn apply_batch(
@@ -430,8 +561,10 @@ fn is_stopping(task: &WatchTask) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use super::{retry_delay, WatchManager};
-    use nexus_core::IncrementalIndexOptions;
+    use super::{queue_full_rescan, retry_delay, terminal_watch_status, WatchManager};
+    use nexus_core::{
+        EventBatchOptions, FileWatchError, IncrementalBatch, IncrementalIndexOptions,
+    };
 
     #[test]
     fn manager_starts_idle_and_stop_is_safe() {
@@ -454,5 +587,37 @@ mod tests {
         };
 
         assert_eq!(retry_delay(&options), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn channel_closure_is_reported_as_a_failed_watch() {
+        let status = terminal_watch_status(Some(&FileWatchError::ChannelClosed));
+
+        assert_eq!(
+            status,
+            (
+                "failed",
+                "文件自动同步已失效，需要重新启动。",
+                Some("file_watch_channel_closed")
+            )
+        );
+    }
+
+    #[test]
+    fn paused_events_are_coalesced_into_one_catch_up_rescan() {
+        let root = std::env::temp_dir().join("nexus-paused-watch-test");
+        let mut batcher = nexus_core::EventBatcher::new(&root, EventBatchOptions::default())
+            .expect("创建事件归并器失败");
+        let normalized_root = batcher.root().to_path_buf();
+
+        queue_full_rescan(&mut batcher).expect("记录暂停期间的第一次变化失败");
+        queue_full_rescan(&mut batcher).expect("记录暂停期间的第二次变化失败");
+
+        assert_eq!(
+            batcher.flush(),
+            Some(IncrementalBatch::RescanRequired {
+                root: normalized_root,
+            })
+        );
     }
 }

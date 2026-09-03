@@ -18,8 +18,9 @@ use nexus_db::{
 };
 
 use super::{
-    document_id_for_path, index_directory_with_control, parse_file, DocumentError, FileEvent,
-    FileSnapshot, ParseError, ParseOptions, RescanControl, RescanError, RescanSummary, ScanOptions,
+    document_id_for_path, file_type_for_extension, index_directory_with_control, parse_file,
+    DocumentError, FileEvent, FileSnapshot, ParseError, ParseOptions, RescanControl, RescanError,
+    RescanSummary, ScanOptions,
 };
 
 /// M4.2 事件归并参数。
@@ -45,7 +46,7 @@ impl Default for EventBatchOptions {
 pub enum IncrementalChange {
     /// 重新读取路径当前状态，并在支持时更新正文。
     Upsert { path: PathBuf },
-    /// 删除该路径对应的元数据和正文记录。
+    /// 删除该路径及其子路径对应的元数据和正文记录。
     Remove { path: PathBuf },
 }
 
@@ -156,14 +157,18 @@ impl EventBatcher {
 
         match event {
             FileEvent::Created { path } | FileEvent::Modified { path } => {
-                self.record_path(path, PendingOperation::Upsert)?;
+                self.record_upsert(path)?;
             }
             FileEvent::Removed { path } => {
                 self.record_path(path, PendingOperation::Remove)?;
             }
             FileEvent::Renamed { from, to } => {
+                let from = self.normalize_path(from)?;
+                let to = self.normalize_path(to)?;
                 if from == to {
-                    self.record_path(to, PendingOperation::Upsert)?;
+                    self.record_upsert(to)?;
+                } else if to.is_dir() {
+                    self.request_rescan();
                 } else {
                     self.record_path(from, PendingOperation::Remove)?;
                     self.record_path(to, PendingOperation::Upsert)?;
@@ -231,6 +236,21 @@ impl EventBatcher {
         Ok(())
     }
 
+    fn record_upsert(&mut self, path: PathBuf) -> Result<(), EventBatchError> {
+        let path = self.normalize_path(path)?;
+        if path.is_dir() {
+            self.request_rescan();
+        } else {
+            self.pending.insert(path, PendingOperation::Upsert);
+        }
+        Ok(())
+    }
+
+    fn request_rescan(&mut self) {
+        self.pending.clear();
+        self.pending_rescan = Some(self.root.clone());
+    }
+
     fn normalize_path(&self, path: PathBuf) -> Result<PathBuf, EventBatchError> {
         if path.as_os_str().is_empty() {
             return Err(EventBatchError::EmptyPath);
@@ -246,7 +266,7 @@ impl EventBatcher {
 }
 
 /// 增量索引处理参数。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncrementalIndexOptions {
     /// 完整重扫使用的扫描选项。
     pub scan_options: ScanOptions,
@@ -572,7 +592,9 @@ fn read_current_file_metadata(path: &Path) -> Result<Option<FileMetadata>, ItemF
         timestamp_millis(metadata.modified()),
         timestamp_millis(metadata.created()),
         timestamp_millis(metadata.accessed()),
-        None,
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(|extension| file_type_for_extension(Some(extension)).map(str::to_owned)),
     )
     .map(Some)
     .map_err(|_| ItemFailure::Metadata)
@@ -590,9 +612,11 @@ fn document_record(document: super::Document) -> DocumentRecord {
 }
 
 fn same_snapshot(before: &FileMetadata, after: &FileMetadata) -> bool {
-    FileSnapshot::from_metadata(before).size_bytes == FileSnapshot::from_metadata(after).size_bytes
-        && FileSnapshot::from_metadata(before).modified_at
-            == FileSnapshot::from_metadata(after).modified_at
+    let before = FileSnapshot::from_metadata(before);
+    let after = FileSnapshot::from_metadata(after);
+    before.size_bytes == after.size_bytes
+        && before.modified_at.is_some()
+        && before.modified_at == after.modified_at
 }
 
 fn timestamp_millis(timestamp: Result<SystemTime, io::Error>) -> Option<i64> {
@@ -652,10 +676,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use nexus_db::{get_document, get_file_metadata, initialize_database};
+    use nexus_db::{get_document, get_file_metadata, initialize_database, FileMetadata};
 
     use super::{
-        apply_incremental_batch_with_retry, document_id_for_path, EventBatchError,
+        apply_incremental_batch_with_retry, document_id_for_path, same_snapshot, EventBatchError,
         EventBatchOptions, EventBatcher, IncrementalBatch, IncrementalBatchSummary,
         IncrementalChange, IncrementalIndexOptions,
     };
@@ -778,6 +802,25 @@ mod tests {
                     IncrementalChange::Upsert { path: to },
                     IncrementalChange::Remove { path: from },
                 ]
+            })
+        );
+    }
+
+    #[test]
+    fn directory_events_request_a_full_rescan() {
+        let temporary_directory = TemporaryDirectory::new();
+        let directory = temporary_directory.child_path("nested");
+        fs::create_dir(&directory).expect("创建目录事件测试目录失败");
+        let mut batcher = batcher(&temporary_directory.path);
+
+        batcher
+            .push(FileEvent::Created { path: directory }, Instant::now())
+            .expect("加入目录创建事件失败");
+
+        assert_eq!(
+            batcher.flush(),
+            Some(IncrementalBatch::RescanRequired {
+                root: temporary_directory.path.clone()
             })
         );
     }
@@ -912,6 +955,94 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
             .expect("统计删除后文档数量失败");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn removing_a_directory_removes_all_descendant_records() {
+        let temporary_directory = TemporaryDirectory::new();
+        let database_path = temporary_directory.database_path();
+        let root = temporary_directory.child_path("library");
+        let directory = root.join("nested");
+        let first_path = directory.join("first.md");
+        let second_path = directory.join("deeper").join("second.md");
+        let sibling_path = root.join("nested-other.md");
+        fs::create_dir_all(second_path.parent().expect("获取目录测试父目录失败"))
+            .expect("创建目录测试父目录失败");
+        fs::write(&first_path, "first body").expect("写入目录测试文件失败");
+        fs::write(&second_path, "second body").expect("写入嵌套目录测试文件失败");
+        fs::write(&sibling_path, "sibling body").expect("写入相邻目录测试文件失败");
+
+        let options = IncrementalIndexOptions {
+            stability_checks: 0,
+            stability_delay: Duration::ZERO,
+            max_retries: 0,
+            retry_delay: Duration::ZERO,
+            ..IncrementalIndexOptions::default()
+        };
+        apply_incremental_batch_with_retry(
+            &database_path,
+            &IncrementalBatch::RescanRequired { root },
+            &options,
+            &RescanControl::new(),
+        )
+        .expect("建立目录删除测试索引失败");
+
+        let connection = initialize_database(&database_path).expect("打开目录删除测试数据库失败");
+        assert!(get_file_metadata(&connection, &first_path)
+            .expect("读取第一个目录测试文件失败")
+            .is_some());
+        assert!(get_file_metadata(&connection, &second_path)
+            .expect("读取第二个目录测试文件失败")
+            .is_some());
+        assert!(get_file_metadata(&connection, &sibling_path)
+            .expect("读取相邻目录测试文件失败")
+            .is_some());
+        drop(connection);
+
+        fs::remove_dir_all(&directory).expect("删除目录测试目录失败");
+        let removal_path = PathBuf::from(format!(
+            "{}{}",
+            directory.display(),
+            std::path::MAIN_SEPARATOR
+        ));
+        apply_incremental_batch_with_retry(
+            &database_path,
+            &IncrementalBatch::Changes {
+                changes: vec![IncrementalChange::Remove { path: removal_path }],
+            },
+            &options,
+            &RescanControl::new(),
+        )
+        .expect("删除目录增量索引失败");
+
+        let connection =
+            initialize_database(&database_path).expect("重新打开目录删除测试数据库失败");
+        assert!(get_file_metadata(&connection, &first_path)
+            .expect("读取删除后的第一个目录测试文件失败")
+            .is_none());
+        assert!(get_file_metadata(&connection, &second_path)
+            .expect("读取删除后的第二个目录测试文件失败")
+            .is_none());
+        assert!(get_file_metadata(&connection, &sibling_path)
+            .expect("读取删除后的相邻目录测试文件失败")
+            .is_some());
+        let metadata_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM file_metadata", [], |row| row.get(0))
+            .expect("统计目录删除后的元数据失败");
+        let document_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .expect("统计目录删除后的文档失败");
+        assert_eq!(metadata_count, 1);
+        assert_eq!(document_count, 1);
+    }
+
+    #[test]
+    fn treats_missing_modified_time_as_unstable() {
+        let before = FileMetadata::from_path(PathBuf::from("notes.md"), 10, None, None, None, None)
+            .expect("构造缺少修改时间的元数据失败");
+        let after = before.clone();
+
+        assert!(!same_snapshot(&before, &after));
     }
 
     #[test]

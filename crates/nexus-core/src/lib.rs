@@ -56,6 +56,55 @@ pub use semantic::{
 };
 pub use watcher::{watch_directory, FileEvent, FileWatchError, FileWatcher};
 
+/// 根据已知扩展名生成稳定的类型标签。
+///
+/// 这是不访问文件内容的 MIME-like 映射，只用于本地元数据和 `type:` 精确过滤；
+/// 未知扩展名仍保持 `None`，不会阻断扫描。
+pub(crate) fn file_type_for_extension(extension: Option<&str>) -> Option<&'static str> {
+    let extension = extension?;
+    if extension.eq_ignore_ascii_case("txt") {
+        Some("text/plain")
+    } else if extension.eq_ignore_ascii_case("md") {
+        Some("text/markdown")
+    } else if extension.eq_ignore_ascii_case("py") {
+        Some("text/x-python")
+    } else if extension.eq_ignore_ascii_case("rs") {
+        Some("text/x-rust")
+    } else if extension.eq_ignore_ascii_case("js") {
+        Some("text/javascript")
+    } else if extension.eq_ignore_ascii_case("ts") {
+        Some("text/typescript")
+    } else if extension.eq_ignore_ascii_case("java") {
+        Some("text/x-java")
+    } else if extension.eq_ignore_ascii_case("c") {
+        Some("text/x-c")
+    } else if extension.eq_ignore_ascii_case("cpp") {
+        Some("text/x-c++")
+    } else if extension.eq_ignore_ascii_case("h") {
+        Some("text/x-c")
+    } else if extension.eq_ignore_ascii_case("hpp") {
+        Some("text/x-c++")
+    } else if extension.eq_ignore_ascii_case("json") {
+        Some("application/json")
+    } else if extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm") {
+        Some("text/html")
+    } else if extension.eq_ignore_ascii_case("css") {
+        Some("text/css")
+    } else if extension.eq_ignore_ascii_case("xml") {
+        Some("application/xml")
+    } else if extension.eq_ignore_ascii_case("yaml") || extension.eq_ignore_ascii_case("yml") {
+        Some("application/yaml")
+    } else if extension.eq_ignore_ascii_case("csv") {
+        Some("text/csv")
+    } else if extension.eq_ignore_ascii_case("docx") {
+        Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    } else if extension.eq_ignore_ascii_case("pdf") {
+        Some("application/pdf")
+    } else {
+        None
+    }
+}
+
 /// 初始化 Nexus 本地核心。
 ///
 /// 数据库连接在本次启动检查结束后由调用方释放；后续里程碑再决定运行时
@@ -675,6 +724,14 @@ mod tests {
             .expect("找不到正文文档");
         assert_eq!(document.source_path, markdown);
         assert_eq!(document.body, "# Quarterly plan\nSearchable local content.");
+        assert_eq!(
+            get_file_metadata(&connection, &markdown)
+                .expect("读取正文文件类型失败")
+                .expect("找不到正文文件元数据")
+                .file_type
+                .as_deref(),
+            Some("text/markdown")
+        );
 
         let results = search_documents(&connection, "searchable", DEFAULT_SEARCH_LIMIT)
             .expect("查询正文索引失败");

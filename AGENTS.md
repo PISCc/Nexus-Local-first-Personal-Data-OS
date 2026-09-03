@@ -17,6 +17,36 @@ features.
 6.  Prefer simple explicit designs over clever designs.
 7.  Do not introduce unnecessary dependencies or premature abstractions.
 
+## Approved Product UI Baseline
+
+The Nexus desktop interface approved on 2026-09-03 is the final visual and
+interaction baseline. Its visual language is **Organic Memory Field**. “Final”
+freezes the style system and core information hierarchy; it does not freeze
+product functionality or prevent accessibility, responsive, feedback, or bug
+fixes that remain within the system.
+
+Before modifying product UI, read `design-system/nexus/MASTER.md` and the
+relevant page override. The production baseline is represented by:
+
+-   `apps/desktop/src/index.css` for tokens, typography, surfaces, and layout;
+-   `apps/desktop/src/App.tsx` and `apps/desktop/src/SearchView.tsx` for the
+    approved shell and search interaction hierarchy;
+-   `apps/desktop/public/nexus-product-icon.png` for the real Nexus product
+    icon; and
+-   `demo/Nexus Visual Direction.html` as the supporting visual-direction
+    reference.
+
+Search remains the interface axis and must visibly preserve
+`query → result → source`. Visual work must preserve existing Tauri commands,
+Rust/TypeScript data structures, search and indexing logic, routes, form fields,
+test selectors, and error handling unless a separately approved product change
+explicitly changes them.
+
+Do not introduce a competing palette, typography system, visual language,
+information hierarchy, or replacement product mark without explicit human
+approval. An approved baseline change must update the product specification,
+design-system documents, and implementation together.
+
 ## Human / Codex Responsibilities
 
 The human developer owns product direction and major architectural

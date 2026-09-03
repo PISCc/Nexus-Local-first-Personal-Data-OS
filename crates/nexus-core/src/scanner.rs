@@ -12,8 +12,10 @@ use std::{
 
 use nexus_db::{normalize_path, FileMetadata, FileMetadataError};
 
+use crate::file_type_for_extension;
+
 /// 文件扫描选项。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanOptions {
     /// 完全跳过这些路径及其子路径。路径会按与扫描根目录相同的规则绝对化。
     pub ignored_paths: Vec<PathBuf>,
@@ -314,7 +316,9 @@ impl FileScanner {
             timestamp_millis(metadata.modified()),
             timestamp_millis(metadata.created()),
             timestamp_millis(metadata.accessed()),
-            None,
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .and_then(|extension| file_type_for_extension(Some(extension)).map(str::to_owned)),
         );
 
         match file_metadata {

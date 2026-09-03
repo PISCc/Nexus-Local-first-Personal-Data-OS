@@ -33,6 +33,10 @@ type BackendStartupStatus = {
   message: string;
 };
 
+type SourceConfigResponse = {
+  rootPath: string | null;
+};
+
 type RescanPhase =
   | "idle"
   | "starting"
@@ -50,6 +54,20 @@ type RescanProgress = {
   documentsSucceeded: number;
   documentsFailed: number;
   documentsSkipped: number;
+};
+
+type IndexHealthState =
+  "not-configured" | "indexing" | "ready" | "degraded" | "failed" | "cancelled";
+
+type IndexHealthResponse = {
+  state: IndexHealthState;
+  message: string;
+  rootPath: string | null;
+  filesIndexed: number;
+  documentsIndexed: number;
+  watchState: "idle" | "running";
+  scanId: number | null;
+  progress: RescanProgress | null;
 };
 
 type RescanSummary = {
@@ -154,6 +172,18 @@ const statusPresentation: Record<
   },
 };
 
+const indexHealthPresentation: Record<
+  IndexHealthState,
+  { label: string; title: string }
+> = {
+  "not-configured": { label: "待配置", title: "还没有可搜索的内容。" },
+  indexing: { label: "正在索引", title: "正在更新本地索引。" },
+  ready: { label: "索引 / 就绪", title: "索引已就绪。" },
+  degraded: { label: "索引 / 需处理", title: "索引需要处理。" },
+  failed: { label: "索引 / 未完成", title: "最近一次索引未完成。" },
+  cancelled: { label: "索引 / 已取消", title: "最近一次索引已取消。" },
+};
+
 const rescanPhasePresentation: Record<
   RescanPhase,
   { label: string; title: string }
@@ -190,6 +220,40 @@ function isBackendStartupStatus(value: unknown): value is BackendStartupStatus {
   return (
     (value.phase === "ready" || value.phase === "degraded") &&
     typeof value.message === "string"
+  );
+}
+
+function isSourceConfigResponse(value: unknown): value is SourceConfigResponse {
+  return (
+    isRecord(value) &&
+    (value.rootPath === null || typeof value.rootPath === "string")
+  );
+}
+
+function isIndexHealthResponse(value: unknown): value is IndexHealthResponse {
+  if (
+    !isRecord(value) ||
+    (value.state !== "not-configured" &&
+      value.state !== "indexing" &&
+      value.state !== "ready" &&
+      value.state !== "degraded" &&
+      value.state !== "failed" &&
+      value.state !== "cancelled") ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    value.message.length > 160 ||
+    /[\r\n]/u.test(value.message)
+  ) {
+    return false;
+  }
+
+  return (
+    (value.rootPath === null || typeof value.rootPath === "string") &&
+    isSafeCount(value.filesIndexed) &&
+    isSafeCount(value.documentsIndexed) &&
+    (value.watchState === "idle" || value.watchState === "running") &&
+    (value.scanId === null || isScanId(value.scanId)) &&
+    (value.progress === null || isRescanProgress(value.progress))
   );
 }
 
@@ -360,10 +424,33 @@ async function loadStartupStatus(): Promise<StartupStatus> {
   };
 }
 
+async function loadSourceConfig(): Promise<SourceConfigResponse | null> {
+  try {
+    const response = await invoke<unknown>("get_source_config");
+    return isSourceConfigResponse(response) ? response : null;
+  } catch {
+    // 浏览器预览或旧版本核心没有来源配置命令，保持空输入。
+    return null;
+  }
+}
+
+async function loadIndexHealth(): Promise<IndexHealthResponse | null> {
+  try {
+    const response = await invoke<unknown>("get_index_health");
+    return isIndexHealthResponse(response) ? response : null;
+  } catch {
+    // 浏览器预览或旧版本核心没有索引健康命令，保留核心启动状态作为后备。
+    return null;
+  }
+}
+
 function App() {
   const [activeView, setActiveView] = useState<ActiveView>("search");
   const [startupStatus, setStartupStatus] =
     useState<StartupStatus>(initialStartupStatus);
+  const [indexHealth, setIndexHealth] = useState<IndexHealthResponse | null>(
+    null,
+  );
   const [rootPath, setRootPath] = useState("");
   const [rescanPhase, setRescanPhase] = useState<RescanPhase>("idle");
   const [rescanMessage, setRescanMessage] = useState(
@@ -393,6 +480,26 @@ function App() {
       }
     });
 
+    void loadSourceConfig().then((config) => {
+      const savedRootPath = config?.rootPath;
+      if (
+        active &&
+        savedRootPath !== null &&
+        savedRootPath !== undefined &&
+        savedRootPath.trim() !== ""
+      ) {
+        setRootPath((current) =>
+          current.trim().length === 0 ? savedRootPath : current,
+        );
+      }
+    });
+
+    void loadIndexHealth().then((health) => {
+      if (active && health !== null) {
+        setIndexHealth(health);
+      }
+    });
+
     return () => {
       active = false;
     };
@@ -409,6 +516,13 @@ function App() {
   useEffect(() => {
     let active = true;
     const unlisteners: Array<() => void> = [];
+
+    const refreshIndexHealth = async () => {
+      const health = await loadIndexHealth();
+      if (active && health !== null) {
+        setIndexHealth(health);
+      }
+    };
 
     const handleProgress = (payload: unknown) => {
       if (!active || !isRescanProgressEvent(payload)) {
@@ -457,6 +571,15 @@ function App() {
       setRescanPhase(payload.status);
       setRescanMessage(payload.message);
       setSummary(payload.summary);
+      void refreshIndexHealth();
+
+      if (payload.status !== "completed") {
+        activeWatchIdRef.current = null;
+        watchPhaseRef.current = "idle";
+        setWatchPhase("idle");
+        setWatchMessage(watchPhasePresentation.idle.message);
+        void loadWatchStatus();
+      }
     };
 
     const handleWatchStatus = (payload: unknown) => {
@@ -487,6 +610,7 @@ function App() {
       }
       setWatchPhase(payload.state);
       setWatchMessage(payload.message);
+      void refreshIndexHealth();
     };
 
     const handleIncrementalFinished = (payload: unknown) => {
@@ -510,6 +634,7 @@ function App() {
 
       latestWatchIdRef.current = payload.watchId;
       setIncrementalSummary(payload);
+      void refreshIndexHealth();
     };
 
     const loadRescanStatus = async () => {
@@ -595,6 +720,7 @@ function App() {
           unlistenWatchStatus,
           unlistenIncrementalFinished,
         );
+        void refreshIndexHealth();
       } catch {
         // 浏览器预览没有 Tauri 事件总线，不影响页面内容展示。
       }
@@ -612,12 +738,67 @@ function App() {
     };
   }, []);
 
-  const presentation = statusPresentation[startupStatus.phase];
   const rescanPresentation = rescanPhasePresentation[rescanPhase];
   const isRescanBusy =
     rescanPhase === "starting" ||
     rescanPhase === "running" ||
     rescanPhase === "cancelling";
+  const statusCard = (() => {
+    if (startupStatus.phase !== "ready") {
+      const presentation = statusPresentation[startupStatus.phase];
+      return {
+        phase: startupStatus.phase,
+        label: presentation.label,
+        title: presentation.title,
+        message: startupStatus.message,
+        footerLabel: "核心连接",
+        footer: presentation.footer,
+      };
+    }
+
+    const healthState: IndexHealthState = isRescanBusy
+      ? "indexing"
+      : (indexHealth?.state ?? "ready");
+    const healthPresentation = indexHealthPresentation[healthState];
+    if (indexHealth === null && !isRescanBusy) {
+      const presentation = statusPresentation.ready;
+      return {
+        phase: "ready",
+        label: presentation.label,
+        title: presentation.title,
+        message: startupStatus.message,
+        footerLabel: "核心连接",
+        footer: presentation.footer,
+      };
+    }
+
+    const filesIndexed = indexHealth?.filesIndexed ?? 0;
+    const documentsIndexed = indexHealth?.documentsIndexed ?? 0;
+    const watchState = indexHealth?.watchState ?? "idle";
+    return {
+      phase: healthState,
+      label: healthPresentation.label,
+      title: healthPresentation.title,
+      message: isRescanBusy
+        ? "正在建立或刷新本地索引，已提交的内容仍可搜索。"
+        : (indexHealth?.message ?? "正在读取本地索引状态。"),
+      footerLabel: `${formatCount(filesIndexed)} 个文件 / ${formatCount(
+        documentsIndexed,
+      )} 篇正文`,
+      footer:
+        healthState === "indexing"
+          ? "正在更新"
+          : watchState === "running"
+            ? "自动同步已开启"
+            : "自动同步未开启",
+    };
+  })();
+  const needsIndexRetry =
+    rescanPhase === "cancelled" ||
+    rescanPhase === "failed" ||
+    indexHealth?.state === "cancelled" ||
+    indexHealth?.state === "failed" ||
+    indexHealth?.state === "degraded";
 
   const handleStartRescan = async () => {
     const normalizedRootPath = rootPath.trim();
@@ -667,8 +848,31 @@ function App() {
       rescanPhaseRef.current = "failed";
       setRescanPhase("failed");
       setRescanMessage(safeCommandMessage(error, "无法启动手动重扫。"));
-      setWatchPhase("failed");
-      setWatchMessage(watchPhasePresentation.failed.message);
+
+      try {
+        const response = await invoke<unknown>("get_watch_status");
+        if (
+          isWatchStatusResponse(response) &&
+          response.state === "running" &&
+          response.watchId !== null
+        ) {
+          activeWatchIdRef.current = response.watchId;
+          latestWatchIdRef.current = response.watchId;
+          watchPhaseRef.current = "watching";
+          setWatchPhase("watching");
+          setWatchMessage(watchPhasePresentation.watching.message);
+        } else {
+          activeWatchIdRef.current = null;
+          watchPhaseRef.current = "idle";
+          setWatchPhase("idle");
+          setWatchMessage(watchPhasePresentation.idle.message);
+        }
+      } catch {
+        activeWatchIdRef.current = null;
+        watchPhaseRef.current = "failed";
+        setWatchPhase("failed");
+        setWatchMessage(watchPhasePresentation.failed.message);
+      }
     }
   };
 
@@ -704,8 +908,17 @@ function App() {
       <aside className="side-rail" aria-label="Nexus 导航">
         <div>
           <div className="brand-lockup">
-            <span className="brand-index">N / 01</span>
-            <span className="brand-name">Nexus</span>
+            <img
+              className="brand-icon"
+              src="/nexus-product-icon.png"
+              alt="Nexus 产品图标"
+              width="34"
+              height="34"
+            />
+            <div className="brand-copy">
+              <span className="brand-index">N / 01</span>
+              <span className="brand-name">Nexus</span>
+            </div>
           </div>
           <p className="rail-caption">个人数据操作系统</p>
         </div>
@@ -781,7 +994,7 @@ function App() {
             <>
               <section className="hero" aria-labelledby="hero-title">
                 <div className="hero-copy">
-                  <p className="eyebrow">Nexus / M3 初始索引</p>
+                  <p className="eyebrow">Nexus / 本地数据索引</p>
                   <h1 id="hero-title">
                     个人数据，
                     <span>留在身边。</span>
@@ -796,14 +1009,14 @@ function App() {
                 </div>
 
                 <section
-                  className={`status-card status-card-${startupStatus.phase}`}
+                  className={`status-card status-card-${statusCard.phase}`}
                   aria-labelledby="status-title"
                 >
                   <div className="status-card-header">
                     <span className="eyebrow">运行状态</span>
                     <span className="status-state" aria-live="polite">
                       <span className="status-dot" aria-hidden="true" />
-                      {presentation.label}
+                      {statusCard.label}
                     </span>
                   </div>
                   <div className="status-card-body">
@@ -811,14 +1024,14 @@ function App() {
                       01
                     </span>
                     <div>
-                      <h2 id="status-title">{presentation.title}</h2>
-                      <p>{startupStatus.message}</p>
+                      <h2 id="status-title">{statusCard.title}</h2>
+                      <p>{statusCard.message}</p>
                     </div>
                   </div>
                   <div className="status-card-footer">
-                    <span>核心连接</span>
+                    <span>{statusCard.footerLabel}</span>
                     <span className="footer-rule" aria-hidden="true" />
-                    <strong>{presentation.footer}</strong>
+                    <strong>{statusCard.footer}</strong>
                   </div>
                 </section>
               </section>
@@ -871,7 +1084,7 @@ function App() {
                   >
                     <label className="path-label" htmlFor="scan-root-path">
                       扫描目录
-                      <span>输入完整路径</span>
+                      <span>已保存来源会自动回填</span>
                     </label>
                     <div className="path-entry">
                       <span className="path-prefix" aria-hidden="true">
@@ -900,7 +1113,8 @@ function App() {
                       />
                     </div>
                     <p id="scan-root-help" className="path-help">
-                      支持 Windows 完整路径；扫描过程中不会上传文件或文件名。
+                      支持 Windows
+                      完整路径；成功索引后会记住此来源。扫描过程中不会上传文件或文件名。
                     </p>
                     <div className="scan-actions">
                       <button
@@ -908,7 +1122,11 @@ function App() {
                         type="submit"
                         disabled={isRescanBusy || rootPath.trim().length === 0}
                       >
-                        {rescanPhase === "starting" ? "准备中…" : "开始索引"}
+                        {rescanPhase === "starting"
+                          ? "准备中…"
+                          : needsIndexRetry
+                            ? "重新索引"
+                            : "开始索引"}
                       </button>
                       <button
                         className="button button-secondary"

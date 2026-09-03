@@ -18,9 +18,10 @@ use nexus_core::{
     RescanProgress, RescanSummary, ScanOptions,
 };
 use nexus_db::{
-    extract_search_text, get_document, initialize_database,
+    extract_search_text, get_document, get_index_statistics, initialize_database,
     search_documents as run_document_search, search_documents_hybrid, DatabaseError,
-    DocumentStoreError, HybridSearchResult, SearchError, SearchResult, DEFAULT_SEARCH_LIMIT,
+    DocumentStoreError, HybridSearchResult, IndexStatistics, IndexStatisticsError, SearchError,
+    SearchResult, DEFAULT_SEARCH_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
@@ -28,7 +29,7 @@ use tracing::{error, info, warn};
 
 mod watch;
 
-use watch::{WatchManager, WatchManagerError, WatchStatusResponse};
+use watch::{WatchManager, WatchManagerError, WatchRestartConfig, WatchStatusResponse};
 
 const DEFAULT_SCAN_BATCH_SIZE: usize = 512;
 const DATABASE_FILE_NAME: &str = "nexus.sqlite3";
@@ -73,6 +74,7 @@ fn get_startup_status(state: State<'_, StartupStatus>) -> StartupStatus {
 #[derive(Clone, Default)]
 struct RescanManager {
     active: Arc<Mutex<Option<ActiveRescan>>>,
+    last_finished: Arc<Mutex<Option<RescanFinishedEvent>>>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -92,6 +94,7 @@ struct RescanTask {
     index_content: bool,
     start_watch: bool,
     persist_watch_root: bool,
+    restart_watch: Option<WatchRestartConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,6 +164,56 @@ fn load_watch_root(app: &AppHandle) -> Option<PathBuf> {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceConfigResponse {
+    root_path: Option<String>,
+}
+
+fn read_source_root(app: &AppHandle) -> Result<Option<PathBuf>, CommandError> {
+    let path = watch_root_file_path(app)?;
+    load_watch_root_file(&path).map_err(|_| CommandError {
+        code: "source_config_read",
+        message: "无法读取已保存的来源配置。",
+    })
+}
+
+#[tauri::command]
+fn get_source_config(app: AppHandle) -> Result<SourceConfigResponse, CommandError> {
+    let root_path = read_source_root(&app)?;
+
+    Ok(SourceConfigResponse {
+        root_path: root_path.map(|path| path.to_string_lossy().into_owned()),
+    })
+}
+
+fn validate_rescan_root(root_path: &Path, follow_symlinks: bool) -> Result<(), CommandError> {
+    let link_metadata = std::fs::symlink_metadata(root_path).map_err(|_| CommandError {
+        code: "rescan_root_unavailable",
+        message: "扫描目录不存在或无法访问。",
+    })?;
+
+    if link_metadata.file_type().is_symlink() && !follow_symlinks {
+        return Err(CommandError {
+            code: "rescan_root_symlink",
+            message: "扫描根目录是符号链接；请明确开启跟随符号链接。",
+        });
+    }
+
+    let metadata = std::fs::metadata(root_path).map_err(|_| CommandError {
+        code: "rescan_root_unavailable",
+        message: "扫描目录不存在或无法访问。",
+    })?;
+    if !metadata.is_dir() {
+        return Err(CommandError {
+            code: "rescan_root_not_directory",
+            message: "扫描路径必须是目录。",
+        });
+    }
+
+    Ok(())
+}
+
 fn database_command_error(error: DatabaseError) -> CommandError {
     let message = match &error {
         DatabaseError::InvalidSchemaVersion { .. }
@@ -191,6 +244,13 @@ fn embedding_command_error(error: nexus_core::EmbeddingError) -> CommandError {
 }
 
 fn document_command_error(error: DocumentStoreError) -> CommandError {
+    CommandError {
+        code: error.kind(),
+        message: error.user_message(),
+    }
+}
+
+fn index_statistics_command_error(error: IndexStatisticsError) -> CommandError {
     CommandError {
         code: error.kind(),
         message: error.user_message(),
@@ -477,6 +537,50 @@ impl RescanManager {
         }
     }
 
+    fn status(&self) -> Result<RescanStatusResponse, CommandError> {
+        let active = self.active.lock().map_err(|_| CommandError {
+            code: "rescan_state_unavailable",
+            message: "无法读取手动重扫状态。",
+        })?;
+
+        Ok(match active.as_ref() {
+            Some(scan) => RescanStatusResponse {
+                state: "running",
+                scan_id: Some(scan.id),
+                progress: Some(scan.progress.into()),
+            },
+            None => RescanStatusResponse {
+                state: "idle",
+                scan_id: None,
+                progress: None,
+            },
+        })
+    }
+
+    fn finish(&self, event: RescanFinishedEvent) {
+        let Ok(mut active) = self.active.lock() else {
+            return;
+        };
+        if !active.as_ref().is_some_and(|scan| scan.id == event.scan_id) {
+            return;
+        }
+
+        if let Ok(mut last_finished) = self.last_finished.lock() {
+            *last_finished = Some(event);
+        }
+        *active = None;
+    }
+
+    fn last_finished(&self) -> Result<Option<RescanFinishedEvent>, CommandError> {
+        self.last_finished
+            .lock()
+            .map(|event| event.clone())
+            .map_err(|_| CommandError {
+                code: "rescan_state_unavailable",
+                message: "无法读取最近一次索引结果。",
+            })
+    }
+
     fn clear(&self, id: u64) {
         let Ok(mut active) = self.active.lock() else {
             return;
@@ -500,23 +604,7 @@ impl RescanManager {
 fn get_rescan_status(
     state: State<'_, RescanManager>,
 ) -> Result<RescanStatusResponse, CommandError> {
-    let active = state.active.lock().map_err(|_| CommandError {
-        code: "rescan_state_unavailable",
-        message: "无法读取手动重扫状态。",
-    })?;
-
-    Ok(match active.as_ref() {
-        Some(scan) => RescanStatusResponse {
-            state: "running",
-            scan_id: Some(scan.id),
-            progress: Some(scan.progress.into()),
-        },
-        None => RescanStatusResponse {
-            state: "idle",
-            scan_id: None,
-            progress: None,
-        },
-    })
+    state.status()
 }
 
 #[tauri::command]
@@ -524,9 +612,149 @@ fn get_watch_status(state: State<'_, WatchManager>) -> Result<WatchStatusRespons
     state.status().map_err(watch_command_error)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexHealthDecision {
+    state: &'static str,
+    message: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexHealthResponse {
+    state: &'static str,
+    message: &'static str,
+    root_path: Option<String>,
+    files_indexed: u64,
+    documents_indexed: u64,
+    watch_state: &'static str,
+    scan_id: Option<u64>,
+    progress: Option<ProgressPayload>,
+}
+
+fn derive_index_health(
+    source_configured: bool,
+    rescan_running: bool,
+    last_finished: Option<&RescanFinishedEvent>,
+    watch_running: bool,
+) -> IndexHealthDecision {
+    if rescan_running {
+        return IndexHealthDecision {
+            state: "indexing",
+            message: "正在建立或刷新本地索引，已提交的内容仍可搜索。",
+        };
+    }
+
+    if let Some(last_finished) = last_finished {
+        match last_finished.status {
+            "failed" => {
+                return IndexHealthDecision {
+                    state: "failed",
+                    message: "最近一次索引未完成；已有索引仍保留，请在下方重试。",
+                };
+            }
+            "cancelled" => {
+                return IndexHealthDecision {
+                    state: "cancelled",
+                    message: "最近一次索引已取消；已有索引未被破坏，可随时重新开始。",
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if !source_configured {
+        return IndexHealthDecision {
+            state: "not-configured",
+            message: "还没有配置本地来源；完成一次索引后即可搜索并自动同步。",
+        };
+    }
+
+    if let Some(last_finished) = last_finished {
+        let scan_incomplete = match last_finished.summary.as_ref() {
+            Some(summary) => summary.files_failed > 0 || summary.documents_failed > 0,
+            None => last_finished.status == "completed",
+        };
+        if scan_incomplete || last_finished.error_kind.is_some() {
+            return IndexHealthDecision {
+                state: "degraded",
+                message: "索引可以使用，但最近一次更新存在未处理内容，请检查任务结果。",
+            };
+        }
+    }
+
+    if !watch_running {
+        return IndexHealthDecision {
+            state: "degraded",
+            message: "现有索引可以搜索，但文件自动同步未运行，请重新索引以恢复。",
+        };
+    }
+
+    IndexHealthDecision {
+        state: "ready",
+        message: "本地索引可用，文件变化会自动同步。",
+    }
+}
+
+fn read_index_statistics(database_path: PathBuf) -> Result<IndexStatistics, CommandError> {
+    let connection = initialize_database(database_path).map_err(database_command_error)?;
+    get_index_statistics(&connection).map_err(index_statistics_command_error)
+}
+
 #[tauri::command]
-fn search_documents(
+async fn get_index_health(
     app: AppHandle,
+    rescan_state: State<'_, RescanManager>,
+    watch_state: State<'_, WatchManager>,
+) -> Result<IndexHealthResponse, CommandError> {
+    let source_root = read_source_root(&app)?;
+    let rescan_status = rescan_state.status()?;
+    let last_finished = rescan_state.last_finished()?;
+    let watch_status = watch_state.status().map_err(watch_command_error)?;
+    let database_path = app_database_path(&app)?;
+    let statistics =
+        tauri::async_runtime::spawn_blocking(move || read_index_statistics(database_path))
+            .await
+            .map_err(|_| CommandError {
+                code: "index_health_thread",
+                message: "无法读取本地索引健康状态。",
+            })??;
+    let decision = derive_index_health(
+        source_root.is_some(),
+        rescan_status.state == "running",
+        last_finished.as_ref(),
+        watch_status.state == "running",
+    );
+
+    Ok(IndexHealthResponse {
+        state: decision.state,
+        message: decision.message,
+        root_path: source_root.map(|path| path.to_string_lossy().into_owned()),
+        files_indexed: statistics.files_indexed,
+        documents_indexed: statistics.documents_indexed,
+        watch_state: watch_status.state,
+        scan_id: rescan_status.scan_id,
+        progress: rescan_status.progress,
+    })
+}
+
+#[tauri::command]
+async fn search_documents(
+    app: AppHandle,
+    request: SearchRequest,
+) -> Result<SearchResponse, CommandError> {
+    let database_path = app_database_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        search_documents_from_database(database_path, request)
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "search_thread",
+        message: "本地搜索暂时不可用。",
+    })?
+}
+
+fn search_documents_from_database(
+    database_path: PathBuf,
     request: SearchRequest,
 ) -> Result<SearchResponse, CommandError> {
     if request.query.trim().is_empty() {
@@ -536,7 +764,6 @@ fn search_documents(
         });
     }
 
-    let database_path = app_database_path(&app)?;
     let connection = initialize_database(database_path).map_err(database_command_error)?;
     let limit = request.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     let results = match extract_search_text(&request.query).map_err(search_command_error)? {
@@ -609,7 +836,9 @@ fn start_rescan(
         });
     }
 
-    watch_state.stop();
+    let root_path = PathBuf::from(request.root_path.trim());
+    validate_rescan_root(&root_path, request.follow_symlinks)?;
+
     let database_path = app_database_path(&app)?;
 
     let control = RescanControl::new();
@@ -619,7 +848,6 @@ fn start_rescan(
 
     manager.reserve(scan_id, control.clone())?;
 
-    let root_path = PathBuf::from(request.root_path);
     let options = ScanOptions {
         ignored_paths: request
             .ignored_paths
@@ -627,6 +855,14 @@ fn start_rescan(
             .map(PathBuf::from)
             .collect(),
         follow_symlinks: request.follow_symlinks,
+    };
+
+    let restart_watch = match watch_state.pause() {
+        Ok(config) => config,
+        Err(error) => {
+            manager.clear(scan_id);
+            return Err(watch_command_error(error));
+        }
     };
 
     let task = RescanTask {
@@ -639,13 +875,23 @@ fn start_rescan(
         index_content: request.index_content,
         start_watch: request.index_content,
         persist_watch_root: request.index_content,
+        restart_watch,
     };
     let cleanup_manager = manager.clone();
+    let restart_watch_on_spawn_failure = task.restart_watch.clone();
+    let restart_manager = watch_manager.clone();
+    let restart_app = app.clone();
     thread::Builder::new()
         .name(format!("nexus-rescan-{scan_id}"))
         .spawn(move || run_rescan(app, manager, watch_manager, task))
         .map_err(|_| {
             cleanup_manager.clear(scan_id);
+            resume_watch_if_possible(
+                &restart_manager,
+                &restart_app,
+                restart_watch_on_spawn_failure,
+                false,
+            );
             CommandError {
                 code: "rescan_thread_start",
                 message: "无法启动手动重扫。",
@@ -700,8 +946,10 @@ fn run_rescan(
         index_content,
         start_watch,
         persist_watch_root,
+        mut restart_watch,
     } = task;
     let embedding_control = control.clone();
+    let watch_scan_options = options.clone();
     let result = if index_content {
         let progress_app = app.clone();
         let progress_manager = manager.clone();
@@ -746,6 +994,7 @@ fn run_rescan(
 
     let event = match result {
         Ok(summary) => {
+            let mut embedding_error_kind = None;
             if persist_watch_root {
                 if let Err(error) = save_watch_root(&app, &root_path) {
                     warn!(error_kind = error.code, "无法保存自动同步目录");
@@ -760,44 +1009,150 @@ fn run_rescan(
                     EmbeddingIndexOptions::default(),
                     &embedding_control,
                 ) {
+                    embedding_error_kind = Some(error.kind());
                     log_embedding_error(&error);
                 }
             }
 
+            let watch_options = watch_options_for_scan(&watch_scan_options);
             if start_watch {
-                if let Err(error) = watch_manager.start(
-                    app.clone(),
-                    database_path.clone(),
-                    root_path.clone(),
-                    IncrementalIndexOptions::default(),
-                ) {
-                    warn!(error_kind = error.kind(), "无法启动文件自动同步");
+                let can_resume = restart_watch.as_ref().is_some_and(|config| {
+                    config.matches(&database_path, &root_path, &watch_options)
+                });
+                if can_resume {
+                    resume_watch_if_possible(&watch_manager, &app, restart_watch.take(), true);
+                } else {
+                    if restart_watch.is_some() {
+                        let _ = watch_manager.stop();
+                    }
+                    if let Err(error) = watch_manager.start_after_rescan(
+                        app.clone(),
+                        database_path.clone(),
+                        root_path.clone(),
+                        watch_options,
+                    ) {
+                        warn!(error_kind = error.kind(), "无法启动文件自动同步");
+                        if let Some(config) = restart_watch.take() {
+                            restart_watch_if_possible(&watch_manager, &app, config);
+                        }
+                    }
                 }
+            } else if let Some(config) = restart_watch.take() {
+                resume_watch_if_possible(&watch_manager, &app, Some(config), false);
             }
 
             RescanFinishedEvent {
                 scan_id,
                 status: "completed",
-                message: "手动重扫完成。".to_owned(),
+                message: if embedding_error_kind.is_some() {
+                    "手动重扫完成，但语义索引未完全更新。".to_owned()
+                } else {
+                    "手动重扫完成。".to_owned()
+                },
                 summary: Some(summary.into()),
-                error_kind: None,
+                error_kind: embedding_error_kind,
             }
         }
-        Err(error) => RescanFinishedEvent {
-            scan_id,
-            status: if matches!(&error, RescanError::Cancelled) {
-                "cancelled"
-            } else {
-                "failed"
-            },
-            message: error.user_message().to_owned(),
-            summary: None,
-            error_kind: Some(error.kind()),
-        },
+        Err(error) => {
+            if let Some(config) = restart_watch.take() {
+                resume_watch_if_possible(&watch_manager, &app, Some(config), false);
+            }
+
+            RescanFinishedEvent {
+                scan_id,
+                status: if matches!(&error, RescanError::Cancelled) {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                message: error.user_message().to_owned(),
+                summary: None,
+                error_kind: Some(error.kind()),
+            }
+        }
     };
 
-    manager.clear(scan_id);
+    manager.finish(event.clone());
     let _ = app.emit(RESCAN_FINISHED_EVENT, event);
+}
+
+fn restart_watch_if_possible(
+    watch_manager: &WatchManager,
+    app: &AppHandle,
+    config: WatchRestartConfig,
+) {
+    start_watch_if_possible(watch_manager, app, config, false);
+}
+
+fn watch_options_for_scan(scan_options: &ScanOptions) -> IncrementalIndexOptions {
+    IncrementalIndexOptions {
+        scan_options: scan_options.clone(),
+        ..IncrementalIndexOptions::default()
+    }
+}
+
+fn restart_watch_after_rescan_if_possible(
+    watch_manager: &WatchManager,
+    app: &AppHandle,
+    config: WatchRestartConfig,
+) {
+    start_watch_if_possible(watch_manager, app, config, true);
+}
+
+fn start_watch_if_possible(
+    watch_manager: &WatchManager,
+    app: &AppHandle,
+    config: WatchRestartConfig,
+    after_rescan: bool,
+) {
+    let result = if after_rescan {
+        watch_manager.start_after_rescan(
+            app.clone(),
+            config.database_path,
+            config.root_path,
+            config.options,
+        )
+    } else {
+        watch_manager.start(
+            app.clone(),
+            config.database_path,
+            config.root_path,
+            config.options,
+        )
+    };
+    if let Err(error) = result {
+        warn!(error_kind = error.kind(), "无法恢复文件自动同步");
+    }
+}
+
+fn resume_watch_if_possible(
+    watch_manager: &WatchManager,
+    app: &AppHandle,
+    fallback: Option<WatchRestartConfig>,
+    after_rescan: bool,
+) {
+    match watch_manager.resume() {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Some(config) = fallback {
+                if after_rescan {
+                    restart_watch_after_rescan_if_possible(watch_manager, app, config);
+                } else {
+                    restart_watch_if_possible(watch_manager, app, config);
+                }
+            }
+        }
+        Err(error) => {
+            warn!(error_kind = error.kind(), "无法恢复文件自动同步");
+            if let Some(config) = fallback {
+                if after_rescan {
+                    restart_watch_after_rescan_if_possible(watch_manager, app, config);
+                } else {
+                    restart_watch_if_possible(watch_manager, app, config);
+                }
+            }
+        }
+    }
 }
 
 fn log_embedding_error(error: &EmbeddingIndexError) {
@@ -832,6 +1187,7 @@ fn start_startup_recovery(app: &AppHandle, manager: &RescanManager, watch_manage
         index_content: true,
         start_watch: true,
         persist_watch_root: false,
+        restart_watch: None,
     };
     let manager = manager.clone();
     let watch_manager = watch_manager.clone();
@@ -916,6 +1272,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_startup_status,
+            get_source_config,
+            get_index_health,
             get_rescan_status,
             get_watch_status,
             search_documents,
@@ -953,13 +1311,17 @@ mod tests {
     };
 
     use super::{
-        database_command_error, load_watch_root_file, save_watch_root_file, ActiveRescan,
-        RescanManager, SearchResultPayload,
+        database_command_error, derive_index_health, load_watch_root_file, save_watch_root_file,
+        search_documents_from_database, validate_rescan_root, watch_options_for_scan, ActiveRescan,
+        RescanFinishedEvent, RescanManager, SearchRequest, SearchResultPayload, SummaryPayload,
     };
-    use nexus_core::{RescanControl, RescanProgress};
-    use nexus_db::{DatabaseError, SearchResult};
+    use nexus_core::{RescanControl, RescanProgress, ScanOptions};
+    use nexus_db::{
+        initialize_database, upsert_document, DatabaseError, DocumentRecord, SearchResult,
+    };
 
     static WATCH_ROOT_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static SEARCH_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn watch_root_test_path() -> PathBuf {
         let sequence = WATCH_ROOT_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1028,6 +1390,106 @@ mod tests {
     }
 
     #[test]
+    fn retains_the_last_finished_rescan_for_health_reporting() {
+        let manager = RescanManager::default();
+        manager
+            .reserve(9, RescanControl::new())
+            .expect("创建完成结果测试重扫失败");
+        manager.finish(RescanFinishedEvent {
+            scan_id: 9,
+            status: "completed",
+            message: "手动重扫完成。".to_owned(),
+            summary: Some(SummaryPayload {
+                files_succeeded: 2,
+                files_failed: 0,
+                paths_skipped: 0,
+                documents_succeeded: 2,
+                documents_failed: 0,
+                documents_skipped: 0,
+                records_removed: 0,
+                batches_committed: 1,
+            }),
+            error_kind: None,
+        });
+
+        assert_eq!(manager.status().expect("读取重扫状态失败").state, "idle");
+        let finished = manager
+            .last_finished()
+            .expect("读取最近索引结果失败")
+            .expect("缺少最近索引结果");
+        assert_eq!(finished.scan_id, 9);
+        assert_eq!(finished.status, "completed");
+    }
+
+    #[test]
+    fn derives_actionable_index_health_states() {
+        let clean = RescanFinishedEvent {
+            scan_id: 1,
+            status: "completed",
+            message: "手动重扫完成。".to_owned(),
+            summary: Some(SummaryPayload {
+                files_succeeded: 2,
+                files_failed: 0,
+                paths_skipped: 0,
+                documents_succeeded: 2,
+                documents_failed: 0,
+                documents_skipped: 0,
+                records_removed: 0,
+                batches_committed: 1,
+            }),
+            error_kind: None,
+        };
+        let partial = RescanFinishedEvent {
+            summary: Some(SummaryPayload {
+                files_failed: 1,
+                ..clean.summary.expect("缺少健康状态测试汇总")
+            }),
+            ..clean.clone()
+        };
+        let failed = RescanFinishedEvent {
+            status: "failed",
+            summary: None,
+            error_kind: Some("rescan_failed"),
+            ..clean.clone()
+        };
+        let cancelled = RescanFinishedEvent {
+            status: "cancelled",
+            summary: None,
+            error_kind: Some("rescan_cancelled"),
+            ..clean.clone()
+        };
+
+        assert_eq!(
+            derive_index_health(false, true, None, false).state,
+            "indexing"
+        );
+        assert_eq!(
+            derive_index_health(false, false, None, false).state,
+            "not-configured"
+        );
+        assert_eq!(
+            derive_index_health(true, false, Some(&clean), true).state,
+            "ready"
+        );
+        assert_eq!(
+            derive_index_health(true, false, Some(&clean), false).state,
+            "degraded"
+        );
+        assert_eq!(
+            derive_index_health(true, false, Some(&partial), true).state,
+            "degraded"
+        );
+        assert_eq!(
+            derive_index_health(true, false, Some(&failed), true).state,
+            "failed"
+        );
+        assert_eq!(
+            derive_index_health(true, false, Some(&cancelled), true).state,
+            "cancelled"
+        );
+    }
+
+    #[test]
     fn active_rescan_contains_a_shared_cancel_controller() {
         let manager = RescanManager::default();
         let control = RescanControl::new();
@@ -1081,6 +1543,57 @@ mod tests {
     }
 
     #[test]
+    fn runs_search_from_a_database_worker_boundary() {
+        let sequence = SEARCH_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = env::temp_dir().join(format!(
+            "nexus-desktop-search-test-{}-{sequence}",
+            process::id()
+        ));
+        fs::create_dir_all(&directory).expect("创建搜索命令测试目录失败");
+        let database_path = directory.join("nexus.sqlite3");
+        let document_path = directory.join("notes.md");
+        let connection = initialize_database(&database_path).expect("初始化搜索命令测试数据库失败");
+        upsert_document(
+            &connection,
+            &DocumentRecord {
+                id: "file:search-worker".to_owned(),
+                source_path: document_path,
+                title: "项目计划".to_owned(),
+                body: "本地搜索工作边界".to_owned(),
+                line_start: None,
+                line_end: None,
+            },
+        )
+        .expect("写入搜索命令测试文档失败");
+        drop(connection);
+
+        let response = search_documents_from_database(
+            database_path,
+            SearchRequest {
+                query: "项目计划".to_owned(),
+                limit: Some(10),
+            },
+        )
+        .expect("执行搜索命令 worker 测试失败");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].document_id, "file:search-worker");
+        fs::remove_dir_all(directory).expect("清理搜索命令测试目录失败");
+    }
+
+    #[test]
+    fn carries_rescan_scan_options_into_the_watch_configuration() {
+        let scan_options = ScanOptions {
+            ignored_paths: vec![PathBuf::from("ignored")],
+            follow_symlinks: true,
+        };
+
+        let watch_options = watch_options_for_scan(&scan_options);
+
+        assert_eq!(watch_options.scan_options, scan_options);
+    }
+
+    #[test]
     fn persists_and_restores_watch_root_for_startup_recovery() {
         let config_path = watch_root_test_path();
         let root = PathBuf::from("C:\\Nexus\\资料");
@@ -1109,5 +1622,24 @@ mod tests {
         );
 
         fs::remove_file(config_path).expect("清理空监听目录配置测试文件失败");
+    }
+
+    #[test]
+    fn validates_a_directory_before_starting_a_rescan() {
+        let directory = env::temp_dir().join(format!(
+            "nexus-rescan-root-validation-{}-{}",
+            process::id(),
+            WATCH_ROOT_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("创建重扫根目录校验测试目录失败");
+
+        validate_rescan_root(&directory, false).expect("有效目录不应被拒绝");
+
+        let file = directory.join("not-a-directory.txt");
+        fs::write(&file, "content").expect("写入重扫根目录校验文件失败");
+        let error = validate_rescan_root(&file, false).expect_err("文件路径不应作为扫描根目录");
+        assert_eq!(error.code, "rescan_root_not_directory");
+
+        fs::remove_dir_all(directory).expect("清理重扫根目录校验测试目录失败");
     }
 }
